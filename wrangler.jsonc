@@ -1,0 +1,18 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "zihin-factory-governor",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-11",
+  "observability": { "enabled": true },
+  "d1_databases": [{
+    "binding": "DB",
+    "database_name": "zihin-factory-db",
+    "database_id": "01b44ac2-2a81-4d5c-b70d-2b7f35f68ac0",
+    "migrations_dir": "migrations"
+  }],
+  "workflows": [{
+    "name": "zihin-factory-core",
+    "binding": "FACTORY_WORKFLOW",
+    "class_name": "FactoryWorkflow"
+  }]
+}
