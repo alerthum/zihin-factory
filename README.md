@@ -1,17 +1,21 @@
 # zihin-factory
 
-24/7 serverless control plane for Kuzenler Yarışıyor / Zihin Arenası AE Engine V2.
+Serverless autonomous control plane for Kuzenler Yarışıyor / Zihin Arenası AE Engine V2.
 
-Current bootstrap:
-- Worker: `zihin-factory-governor`
-- D1: `zihin-factory-db`
-- Durable Workflow: `zihin-factory-core`
-- Persistent WORK_QUEUE / PROJECT_STATE / RUNS / EVENTS / AGENTS / ARTIFACTS / BLOCKERS / METRICS
+Current phase: **Autonomous Governor**
 
-Endpoints:
-- `GET /health`
-- `GET /status`
-- `GET /jobs`
-- `POST /jobs`
+Operational chain:
 
-Next: Queue → NVIDIA NIM → Telegram → GitHub project worker → quality/eval gates.
+`Roadmap -> Governor -> D1 WORK_QUEUE -> Cloudflare Queue -> Durable Workflow -> Specialist Agent -> Independent QA -> PASS/RETRY/QUARANTINE/BLOCKED -> Artifact/Decision persistence -> Governor wake -> next task`
+
+Runtime:
+- Cloudflare Workers
+- Cloudflare Workflows
+- Cloudflare Queues
+- Cloudflare D1
+- NVIDIA NIM
+- Telegram notifications
+
+Admin endpoints require `FACTORY_ADMIN_TOKEN`; `/health` is public.
+
+The first autonomous roadmap is bounded. The factory does **not** create infinite AI work when the seeded roadmap is exhausted.
