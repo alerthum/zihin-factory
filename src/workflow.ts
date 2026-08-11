@@ -50,7 +50,7 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
     });
 
     try {
-      let result: unknown;
+      let result: Record<string, unknown>;
 
       if (job.job_type === "ai.smoke-test") {
         const payload = JSON.parse(job.payload_json || "{}") as {
@@ -73,19 +73,11 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
           })
         );
 
-        result = {
-          ok: true,
-          kind: "ai.smoke-test",
-          model: ai.model,
-          content: ai.content,
-          usage: ai.usage
-        };
-
         await step.do("persist ai artifact", async () => {
           await this.env.DB.prepare(
             `INSERT INTO ARTIFACTS
              (id,job_id,kind,name,metadata_json)
-             VALUES (?,?,'ai-output','JOB-002 NVIDIA smoke result',?)`
+             VALUES (?,?,'ai-output','NVIDIA AI output',?)`
           ).bind(
             crypto.randomUUID(),
             jobId,
@@ -93,17 +85,46 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
           ).run();
         });
 
-        await step.do(
-          "telegram success notification",
-          { retries: { limit: 3, delay: "5 seconds", backoff: "exponential" } },
-          async () => sendTelegram(
-            this.env,
-            `✅ Zihin Factory JOB-002 tamamlandı\n` +
-            `Job: ${jobId}\n` +
-            `Model: ${ai.model}\n\n` +
-            `${ai.content.slice(0, 1200)}`
-          )
-        );
+        let notificationStatus = "sent";
+        let notificationError: string | null = null;
+
+        try {
+          await step.do(
+            "telegram success notification",
+            { retries: { limit: 3, delay: "5 seconds", backoff: "exponential" } },
+            async () => sendTelegram(
+              this.env,
+              `✅ Zihin Factory işi tamamlandı\n` +
+              `Job: ${jobId}\nModel: ${ai.model}\n\n${ai.content.slice(0, 1200)}`
+            )
+          );
+        } catch (notifyError) {
+          notificationStatus = "failed";
+          notificationError =
+            notifyError instanceof Error ? notifyError.message : String(notifyError);
+
+          await step.do("record notification warning", async () => {
+            await this.env.DB.prepare(
+              `INSERT INTO RUN_EVENTS(run_id,event_type,message,data_json)
+               VALUES (?,'notification_failed','Telegram notification failed',?)`
+            ).bind(
+              runId,
+              JSON.stringify({ error: notificationError?.slice(0, 2000) })
+            ).run();
+          });
+        }
+
+        result = {
+          ok: true,
+          kind: "ai.smoke-test",
+          model: ai.model,
+          content: ai.content,
+          usage: ai.usage,
+          notification: {
+            status: notificationStatus,
+            error: notificationError
+          }
+        };
       } else {
         result = {
           ok: true,
@@ -118,13 +139,14 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
         await this.env.DB.batch([
           this.env.DB.prepare(
             `UPDATE WORK_QUEUE
-             SET status='completed',result_json=?,
+             SET status='completed',result_json=?,error_text=NULL,
                  completed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP
              WHERE id=?`
           ).bind(resultJson, jobId),
           this.env.DB.prepare(
             `UPDATE RUNS
-             SET status='completed',result_json=?,completed_at=CURRENT_TIMESTAMP
+             SET status='completed',result_json=?,error_text=NULL,
+                 completed_at=CURRENT_TIMESTAMP
              WHERE id=?`
           ).bind(resultJson, runId),
           this.env.DB.prepare(
@@ -143,8 +165,7 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
           this.env.DB.prepare(
             `UPDATE WORK_QUEUE
              SET status='failed',error_text=?,completed_at=CURRENT_TIMESTAMP,
-                 updated_at=CURRENT_TIMESTAMP
-             WHERE id=?`
+                 updated_at=CURRENT_TIMESTAMP WHERE id=?`
           ).bind(message.slice(0, 4000), jobId),
           this.env.DB.prepare(
             `UPDATE RUNS
@@ -158,6 +179,7 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
         ]);
       });
 
+      // Failure notification is best-effort only; it never changes the original failure.
       try {
         await step.do(
           "telegram failure notification",
@@ -168,7 +190,7 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
           )
         );
       } catch {
-        // Notification failure must not erase the original job failure.
+        // Deliberately ignored.
       }
 
       throw error;
