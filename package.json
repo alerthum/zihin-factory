@@ -1,6 +1,6 @@
 {
   "name": "zihin-factory",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -12,6 +12,6 @@
   "devDependencies": {
     "@cloudflare/workers-types": "^5.0.0",
     "typescript": "^5.9.0",
-    "wrangler": "^4.79.0"
+    "wrangler": "^4.120.1"
   }
 }

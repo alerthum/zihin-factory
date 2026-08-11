@@ -3,16 +3,46 @@
   "name": "zihin-factory-governor",
   "main": "src/index.ts",
   "compatibility_date": "2026-08-11",
-  "observability": { "enabled": true },
-  "d1_databases": [{
-    "binding": "DB",
-    "database_name": "zihin-factory-db",
-    "database_id": "01b44ac2-2a81-4d5c-b70d-2b7f35f68ac0",
-    "migrations_dir": "migrations"
-  }],
-  "workflows": [{
-    "name": "zihin-factory-core",
-    "binding": "FACTORY_WORKFLOW",
-    "class_name": "FactoryWorkflow"
-  }]
+  "preview_urls": false,
+  "observability": {
+    "enabled": true
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "zihin-factory-db",
+      "database_id": "01b44ac2-2a81-4d5c-b70d-2b7f35f68ac0",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "workflows": [
+    {
+      "name": "zihin-factory-core",
+      "binding": "FACTORY_WORKFLOW",
+      "class_name": "FactoryWorkflow"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "JOB_QUEUE",
+        "queue": "zihin-factory-jobs"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "zihin-factory-jobs",
+        "max_batch_size": 5,
+        "max_batch_timeout": 2,
+        "max_retries": 5,
+        "retry_delay": 15,
+        "dead_letter_queue": "zihin-factory-jobs-dlq"
+      }
+    ]
+  },
+  "triggers": {
+    "crons": [
+      "* * * * *"
+    ]
+  }
 }
