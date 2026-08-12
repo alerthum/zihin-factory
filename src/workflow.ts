@@ -50,23 +50,23 @@ async function recordQuality(
     review: QualityReview;
   }
 ): Promise<void> {
-  await db.prepare(
-    `INSERT INTO QUALITY_REVIEWS
-     (id,job_id,run_id,reviewer_role,producer_model,reviewer_model,attempt_no,decision,score,reasons_json,revision_instructions,deterministic_issues_json)
-     VALUES (?,?,?,'QA Supervisor',?,?,?,?,?,?,?,?)`
-  ).bind(
-    crypto.randomUUID(),
-    input.jobId,
-    input.runId,
-    input.producerModel,
-    input.review.reviewerModel,
-    input.attemptNo,
-    input.review.decision,
-    input.review.score,
-    JSON.stringify(input.review.reasons),
-    input.review.revisionInstructions,
-    JSON.stringify(input.review.deterministicIssues)
-  ).run();
+  await db.batch([
+    db.prepare(
+      `INSERT INTO QUALITY_REVIEWS
+       (id,job_id,run_id,reviewer_role,producer_model,reviewer_model,attempt_no,decision,score,reasons_json,revision_instructions,deterministic_issues_json)
+       VALUES (?,?,?,'QA Supervisor',?,?,?,?,?,?,?,?)`
+    ).bind(
+      crypto.randomUUID(),input.jobId,input.runId,input.producerModel,input.review.reviewerModel,input.attemptNo,
+      input.review.decision,input.review.score,JSON.stringify(input.review.reasons),input.review.revisionInstructions,
+      JSON.stringify(input.review.deterministicIssues)
+    ),
+    db.prepare(
+      `INSERT INTO ARTIFACTS(id,job_id,kind,name,metadata_json) VALUES (?,?,'qa-raw',?,?)`
+    ).bind(
+      crypto.randomUUID(),input.jobId,`QA raw response attempt ${input.attemptNo}`,
+      JSON.stringify({ reviewerModel:input.review.reviewerModel,attempt:input.attemptNo,parseMode:input.review.parseMode,rawReviewText:input.review.rawReviewText })
+    )
+  ]);
 }
 
 async function notifyBestEffort(env: Env, text: string): Promise<void> {
@@ -95,7 +95,8 @@ async function providerHeartbeat(db: D1Database, jobId: string): Promise<void> {
 export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
   async run(event: WorkflowEvent<FactoryJobParams>, step: WorkflowStep) {
     const jobId = event.payload.jobId;
-    const runId = crypto.randomUUID();
+    // Workflows may hibernate/restart; non-deterministic state must be persisted by a step.
+    const runId = await step.do("allocate run id", async () => crypto.randomUUID());
 
     const job = await step.do("load job", async () => {
       const row = await this.env.DB.prepare(
@@ -166,7 +167,7 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
         async () => runNvidiaText(this.env,{
           system:routed.systemPrompt,
           prompt:`OBJECTIVE:\n${objective}\n\nACCEPTANCE CRITERIA:\n${acceptanceCriteria.map((x,i)=>`${i+1}. ${x}`).join("\n") || "1. Materially satisfy the objective."}\n\nCONTEXT:\n${JSON.stringify(payload.context ?? {},null,2)}\n\nProduce the artifact now.`,
-          maxTokens:900,
+          maxTokens:1050,
           temperature:0.15,
           purpose:routed.purpose,
           onHeartbeat:() => providerHeartbeat(this.env.DB,jobId)
@@ -184,7 +185,7 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
       });
 
       await step.do("qa heartbeat 1", async () => touchJob(this.env.DB,jobId,runId,"qa_started","Independent QA attempt 1 started"));
-      let review = await step.do("independent qa 1", async () => reviewOutput(this.env,{
+      let review = await step.do("independent qa 1", { retries:{ limit:1,delay:"6 seconds",backoff:"exponential" } }, async () => reviewOutput(this.env,{
         objective,acceptanceCriteria,producerRole:routed.role,producerModel:producer.model,output:producer.content,attempt,
         onHeartbeat:() => providerHeartbeat(this.env.DB,jobId)
       }));
@@ -203,7 +204,7 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
           async () => runNvidiaText(this.env,{
             system:routed.systemPrompt,
             prompt:`Revise the artifact.\n\nOBJECTIVE:\n${objective}\n\nACCEPTANCE CRITERIA:\n${acceptanceCriteria.map((x,i)=>`${i+1}. ${x}`).join("\n")}\n\nQA REVISION INSTRUCTIONS:\n${instructions}\n\nPREVIOUS ARTIFACT:\n${previous}\n\nReturn the full corrected artifact, not a commentary about changes.`,
-            maxTokens:950,temperature:0.1,purpose:routed.purpose,
+            maxTokens:1100,temperature:0.1,purpose:routed.purpose,
             onHeartbeat:() => providerHeartbeat(this.env.DB,jobId)
           })
         );
@@ -219,7 +220,7 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
         });
 
         await step.do(`qa heartbeat ${attempt}`, async () => touchJob(this.env.DB,jobId,runId,"qa_revision_started",`Independent QA attempt ${attempt} started`));
-        review = await step.do(`independent qa ${attempt}`, async () => reviewOutput(this.env,{
+        review = await step.do(`independent qa ${attempt}`, { retries:{ limit:1,delay:"6 seconds",backoff:"exponential" } }, async () => reviewOutput(this.env,{
           objective,acceptanceCriteria,producerRole:routed.role,producerModel:producer.model,output:producer.content,attempt,
           onHeartbeat:() => providerHeartbeat(this.env.DB,jobId)
         }));

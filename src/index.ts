@@ -36,7 +36,7 @@ function authorized(request: Request, env: Env): boolean {
 async function markPhase(db: D1Database): Promise<void> {
   await db.prepare(
     `INSERT INTO PROJECT_STATE(key,value,updated_at)
-     VALUES ('factory_phase','autonomous-qa-resilient',CURRENT_TIMESTAMP)
+     VALUES ('factory_phase','autonomous-qa-contract-resilient',CURRENT_TIMESTAMP)
      ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP`
   ).run();
 }
@@ -93,6 +93,58 @@ async function dispatchJobMessage(env: Env, message: Message<unknown>, body: Que
   message.ack();
 }
 
+async function restartDispatchedRoadmapJob(env: Env, roadmapId: string): Promise<{ restarted:boolean; roadmapId:string; jobId?:string; terminated?:boolean; reason?:string }> {
+  const roadmap = await env.DB.prepare(
+    `SELECT id,status,work_queue_id FROM FACTORY_ROADMAP WHERE id=?`
+  ).bind(roadmapId).first<{ id:string; status:string; work_queue_id:string|null }>();
+
+  if (!roadmap) return { restarted:false,roadmapId,reason:"roadmap_not_found" };
+  if (roadmap.status === "done") return { restarted:false,roadmapId,reason:"already_done" };
+  if (roadmap.status === "ready") return { restarted:false,roadmapId,reason:"already_ready" };
+  if (!["dispatched","quarantine","blocked"].includes(roadmap.status) || !roadmap.work_queue_id) {
+    return { restarted:false,roadmapId,reason:`not_restartable:${roadmap.status}` };
+  }
+
+  const job = await env.DB.prepare(
+    `SELECT id,status,workflow_instance_id FROM WORK_QUEUE WHERE id=?`
+  ).bind(roadmap.work_queue_id).first<{ id:string; status:string; workflow_instance_id:string|null }>();
+
+  if (!job) {
+    await env.DB.prepare(`UPDATE FACTORY_ROADMAP SET status='ready',work_queue_id=NULL,result_summary='Restarted after QA contract patch',updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(roadmapId).run();
+    return { restarted:true,roadmapId,reason:"missing_job_reset_to_ready" };
+  }
+  if (job.status === "completed") return { restarted:false,roadmapId,jobId:job.id,reason:"job_completed" };
+
+  let terminated = false;
+  if (job.workflow_instance_id && ["running","queued","verify"].includes(job.status)) {
+    try {
+      const instance = await env.FACTORY_WORKFLOW.get(job.workflow_instance_id);
+      const status = await instance.status();
+      if (["queued","running","waiting","paused","waitingForPause"].includes(status.status)) {
+        await instance.terminate();
+        terminated = true;
+      }
+    } catch { /* D1 reset remains authoritative for restart */ }
+  }
+
+  await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE WORK_QUEUE SET status='abandoned',error_text='admin_roadmap_restart',completed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status!='completed'`
+    ).bind(job.id),
+    env.DB.prepare(
+      `UPDATE RUNS SET status='abandoned',error_text='admin_roadmap_restart',completed_at=CURRENT_TIMESTAMP WHERE job_id=? AND status='running'`
+    ).bind(job.id),
+    env.DB.prepare(
+      `UPDATE FACTORY_ROADMAP SET status='ready',work_queue_id=NULL,result_summary='Restarted after QA contract patch',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('dispatched','quarantine','blocked')`
+    ).bind(roadmapId),
+    env.DB.prepare(
+      `INSERT INTO JOB_DECISIONS(job_id,decision_type,actor_role,data_json) VALUES (?,'ADMIN_RESTART','Governor',?)`
+    ).bind(job.id,JSON.stringify({ roadmapId,terminated }))
+  ]);
+
+  return { restarted:true,roadmapId,jobId:job.id,terminated };
+}
+
 async function factorySnapshot(db: D1Database) {
   const state = await db.prepare(`SELECT key,value,updated_at FROM PROJECT_STATE ORDER BY key`).all();
   const queue = await db.prepare(
@@ -142,7 +194,7 @@ export default {
       return json({
         ok: true,
         service: "zihin-factory-governor",
-        phase: "autonomous-qa-resilient",
+        phase: "autonomous-qa-contract-resilient",
         time: new Date().toISOString(),
         meta: meta.results
       });
@@ -159,7 +211,7 @@ export default {
 
     if (request.method === "GET" && url.pathname === "/factory") {
       const snapshot = await factorySnapshot(env.DB);
-      return json({ ok:true,phase:"autonomous-qa-resilient",...snapshot });
+      return json({ ok:true,phase:"autonomous-qa-contract-resilient",...snapshot });
     }
 
     if (request.method === "GET" && url.pathname === "/jobs") {
@@ -193,6 +245,17 @@ export default {
       return json({ ok:true,continuous:false });
     }
 
+    if (request.method === "POST" && url.pathname === "/admin/restart-roadmap-job") {
+      let body: { roadmapId?: string };
+      try { body = await request.json(); }
+      catch { return json({ ok:false,error:"invalid_json" }, { status:400 }); }
+      const roadmapId = String(body.roadmapId ?? "").trim();
+      if (!roadmapId) return json({ ok:false,error:"roadmapId_required" }, { status:400 });
+      const restart = await restartDispatchedRoadmapJob(env,roadmapId);
+      const cycle = await governorCycle(env);
+      return json({ ok:true,restart,cycle });
+    }
+
     if (request.method === "POST" && url.pathname === "/admin/recover-stale") {
       const recovery = await recoverStaleJobs(env,2);
       const cycle = await governorCycle(env);
@@ -224,7 +287,7 @@ export default {
     return json({
       ok:true,
       service:"zihin-factory-governor",
-      phase:"autonomous-qa-resilient",
+      phase:"autonomous-qa-contract-resilient",
       routes:[
         "GET /health (public)",
         "GET /factory (Bearer token)",
@@ -235,6 +298,7 @@ export default {
         "POST /admin/seed-roadmap (Bearer token)",
         "POST /admin/start (Bearer token)",
         "POST /admin/pause (Bearer token)",
+        "POST /admin/restart-roadmap-job (Bearer token)",
         "POST /admin/recover-stale (Bearer token)",
         "POST /admin/cycle (Bearer token)"
       ]

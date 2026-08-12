@@ -17,25 +17,26 @@ const STREAM_IDLE_TIMEOUT_MS = 25_000;
 const STREAM_TOTAL_TIMEOUT_MS = 75_000;
 const HEARTBEAT_INTERVAL_MS = 12_000;
 const MAX_PROVIDER_ATTEMPTS = 3;
+const REVIEWER_PROVIDER_ATTEMPTS = 2;
 
 // Latency-first order: the public hosted NIM endpoint can return 524 when a
 // large model does not begin responding quickly enough. We prefer smaller
 // instruction models for control-plane work and retain larger models as
 // quality fallbacks when they are present in /v1/models.
 const PRODUCER_MODELS = [
-  "meta/llama-3.1-8b-instruct",
-  "mistralai/mistral-small-3.1-24b-instruct-2503",
-  "nvidia/llama-3.3-nemotron-super-49b-v1.5",
   "meta/llama-3.3-70b-instruct",
+  "mistralai/mistral-small-3.1-24b-instruct-2503",
+  "meta/llama-3.1-8b-instruct",
+  "nvidia/llama-3.3-nemotron-super-49b-v1.5",
   "meta/llama-3.1-70b-instruct"
 ];
 
 const REVIEWER_MODELS = [
-  "mistralai/mistral-small-3.1-24b-instruct-2503",
+  "meta/llama-3.1-70b-instruct",
   "qwen/qwen2.5-72b-instruct",
+  "mistralai/mistral-small-3.1-24b-instruct-2503",
   "nvidia/llama-3.3-nemotron-super-49b-v1.5",
-  "meta/llama-3.1-8b-instruct",
-  "meta/llama-3.1-70b-instruct"
+  "meta/llama-3.1-8b-instruct"
 ];
 
 const CODER_MODELS = [
@@ -252,7 +253,8 @@ export async function runNvidiaText(
   messages.push({ role: "user", content: input.prompt });
 
   const failures: string[] = [];
-  const maxAttempts = Math.min(MAX_PROVIDER_ATTEMPTS, candidates.length);
+  const attemptBudget = (input.purpose ?? "producer") === "reviewer" ? REVIEWER_PROVIDER_ATTEMPTS : MAX_PROVIDER_ATTEMPTS;
+  const maxAttempts = Math.min(attemptBudget, candidates.length);
 
   for (let i = 0; i < maxAttempts; i++) {
     const model = candidates[i];

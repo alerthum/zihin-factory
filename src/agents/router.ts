@@ -44,7 +44,7 @@ const ROLE_PROMPTS: Record<AgentRole, string> = {
   "Source Auditor": "Audit provenance, copyright risk, source coverage, and whether evidence is sufficient for production use.",
   "Structure Miner": "Extract reusable cognitive structures, invariants, parameter axes, and failure modes without copying source wording.",
   "Curriculum Mapper": "Map the task to competencies, claims, evidence requirements, prerequisite knowledge, and grade constraints.",
-  "Factory Designer": "Design an implementation-ready ItemFactorySpec or factory subsystem with explicit contracts, invariants, tests, and rollback points.",
+  "Factory Designer": "Design an implementation-ready ItemFactorySpec or factory subsystem with explicit contracts, invariants, tests, and rollback points. For specification tasks, address every acceptance criterion explicitly, use an acceptance-to-evidence matrix, and do not invent a repository language or fake code when repository context is unavailable. Prefer concise language-neutral contracts over boilerplate sample code.",
   "Generator": "Generate candidates from an existing approved factory specification. Respect constraints and preserve solver-verifiable semantics.",
   "Solver": "Independently solve and verify correctness, uniqueness, parameter constraints, and edge cases. Do not trust producer answers.",
   "Distractor Engineer": "Derive distractors from plausible misconceptions and verify that every distractor is wrong, relevant, and diagnostically meaningful.",
@@ -94,7 +94,7 @@ export function routeAgent(
   return {
     role,
     purpose: role === "Codex Engineer" ? "coder" : "producer",
-    systemPrompt: `${CORE_RULES}\nROLE: ${role}\n${ROLE_PROMPTS[role]}\n\nReturn a concrete artifact with these headings: Outcome, Decisions, Implementation Details, Verification, Risks/Blockers, Next Action.`
+    systemPrompt: `${CORE_RULES}\nROLE: ${role}\n${ROLE_PROMPTS[role]}\n\nReturn a concrete, concise artifact with these headings: Outcome, Decisions, Implementation Details, Verification, Risks/Blockers, Next Action. Explicitly map every acceptance criterion to a verifiable implementation or test. Do not spend the token budget on illustrative boilerplate.`
   };
 }
 
