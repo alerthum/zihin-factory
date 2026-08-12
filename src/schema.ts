@@ -20,17 +20,25 @@ export const SCHEMA_STATEMENTS = [
 `CREATE TABLE IF NOT EXISTS JOB_DECISIONS (id INTEGER PRIMARY KEY AUTOINCREMENT,job_id TEXT NOT NULL,decision_type TEXT NOT NULL,actor_role TEXT NOT NULL,data_json TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
 `CREATE TABLE IF NOT EXISTS PROJECT_REPOS (alias TEXT PRIMARY KEY,repo_full_name TEXT NOT NULL,default_branch TEXT,write_mode TEXT NOT NULL DEFAULT 'pr-only',enabled INTEGER NOT NULL DEFAULT 1,last_checked_at TEXT,last_error TEXT,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
 `CREATE TABLE IF NOT EXISTS GITHUB_OPERATIONS (id TEXT PRIMARY KEY,job_id TEXT,repo_full_name TEXT NOT NULL,operation TEXT NOT NULL,branch_name TEXT,pr_number INTEGER,status TEXT NOT NULL,data_json TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
-`CREATE INDEX IF NOT EXISTS IX_GITHUB_OPERATIONS_JOB ON GITHUB_OPERATIONS(job_id,created_at)`
+`CREATE INDEX IF NOT EXISTS IX_GITHUB_OPERATIONS_JOB ON GITHUB_OPERATIONS(job_id,created_at)`,
+`CREATE TABLE IF NOT EXISTS PROJECT_IMPACT (id TEXT PRIMARY KEY,roadmap_id TEXT,job_id TEXT,impact_area TEXT NOT NULL,repo_full_name TEXT,branch_name TEXT,pr_number INTEGER,pr_url TEXT,status TEXT NOT NULL,summary TEXT NOT NULL,files_json TEXT NOT NULL DEFAULT '[]',qa_score REAL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
+`CREATE INDEX IF NOT EXISTS IX_PROJECT_IMPACT_STATUS ON PROJECT_IMPACT(status,created_at)`,
+`CREATE INDEX IF NOT EXISTS IX_PROJECT_IMPACT_ROADMAP ON PROJECT_IMPACT(roadmap_id,created_at)`,
+`CREATE TABLE IF NOT EXISTS PROJECT_FEED_LOG (id INTEGER PRIMARY KEY AUTOINCREMENT,action TEXT NOT NULL,roadmap_id TEXT,detail_json TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
+`CREATE INDEX IF NOT EXISTS IX_PROJECT_FEED_LOG_CREATED ON PROJECT_FEED_LOG(created_at)`
 ] as const;
 
 const AGENT_ROLES = [
   "Research Scout","Source Auditor","Structure Miner","Curriculum Mapper","Factory Designer","Generator","Solver","Distractor Engineer","Tutor Designer","Child Reviewer","Fairness Reviewer","IP/Security Reviewer","Psychometrician","Game Planner","Codex Engineer","QA Supervisor","Release Manager"
 ] as const;
 
+let schemaReadyUntil = 0;
+
 export async function ensureSchema(db: D1Database): Promise<void> {
+  if (Date.now() < schemaReadyUntil) return;
   for (const sql of SCHEMA_STATEMENTS) await db.prepare(sql).run();
 
-  for (const [key,value] of [["schema_version","5"],["factory_version","0.5.0"]]) {
+  for (const [key,value] of [["schema_version","6"],["factory_version","0.6.0"]]) {
     await db.prepare(
       `INSERT INTO FACTORY_META(key,value,updated_at) VALUES (?,?,CURRENT_TIMESTAMP)
        ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP`
@@ -42,8 +50,11 @@ export async function ensureSchema(db: D1Database): Promise<void> {
     ["g8_turkish_research","10/10"],
     ["g8_turkish_verified_integration","7/10"],
     ["g8_turkish_live","blocked"],
-    ["factory_phase","autonomous-governor"],
-    ["continuous_enabled","0"]
+    ["factory_phase","production-loop-dashboard"],
+    ["continuous_enabled","0"],
+    ["project_feeder_enabled","1"],
+    ["project_completion_percent","82"],
+    ["project_completion_source","baseline-manual"]
   ];
 
   for (const [key,value] of state) {
@@ -62,11 +73,12 @@ export async function ensureSchema(db: D1Database): Promise<void> {
     ).bind(role.toLowerCase().replace(/[^a-z0-9]+/g,"-"), role).run();
   }
 
-  for (const [alias,repo] of [["factory","alerthum/zihin-factory"],["product","alerthum/Kuzenler_Yarisiyor"]]) {
+  for (const [alias,repo] of [["factory","alerthum/zihin-factory"],["product","alerthum/KuzenlerYarisiyor"]]) {
     await db.prepare(
       `INSERT INTO PROJECT_REPOS(alias,repo_full_name,write_mode,enabled,updated_at)
        VALUES (?,?,'pr-only',1,CURRENT_TIMESTAMP)
        ON CONFLICT(alias) DO NOTHING`
     ).bind(alias,repo).run();
   }
+  schemaReadyUntil = Date.now() + 5 * 60 * 1000;
 }

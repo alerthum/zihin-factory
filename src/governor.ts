@@ -1,7 +1,9 @@
+import { projectFeederCycle, type ProjectFeederResult } from "./project/feeder";
 export type GovernorEnv = {
   DB: D1Database;
   JOB_QUEUE: Queue;
   FACTORY_WORKFLOW?: Workflow;
+  GITHUB_TOKEN?: string;
 };
 
 export type GovernorCycleResult = {
@@ -11,6 +13,7 @@ export type GovernorCycleResult = {
   active: number;
   action: string;
   reconciled?: number;
+  projectFeeder?: ProjectFeederResult;
 };
 
 type RoadmapRow = {
@@ -258,7 +261,7 @@ export async function seedRoadmap(db: D1Database): Promise<{ inserted: number }>
       sequence: 30,
       title: "Factory GitHub project worker production contract",
       role: "Codex Engineer",
-      objective: "Cloudflare factory'nin zihin-factory ve ana Kuzenler_Yarisiyor reposunda kontrollü branch/commit/PR oluşturabilmesi için minimum-yetkili GitHub write worker contract üret. Secret modeli, branch policy, PR-only write, CI gate, rollback ve audit eventlerini tanımla. Token/secret değerlerini isteme veya çıktı içine yazma.",
+      objective: "Cloudflare factory'nin zihin-factory ve ana KuzenlerYarisiyor reposunda kontrollü branch/commit/PR oluşturabilmesi için minimum-yetkili GitHub write worker contract üret. Secret modeli, branch policy, PR-only write, CI gate, rollback ve audit eventlerini tanımla. Token/secret değerlerini isteme veya çıktı içine yazma.",
       acceptance: [
         "Main branch'e doğrudan keyfi push yasaklanmalı; branch + PR akışı olmalı.",
         "Minimum repository permission set açıkça tanımlanmalı.",
@@ -313,6 +316,7 @@ export async function governorCycle(env: GovernorEnv): Promise<GovernorCycleResu
       await recoverStaleJobs(env as GovernorEnv & { FACTORY_WORKFLOW: Workflow },5);
     }
 
+    const projectFeeder = await projectFeederCycle(env);
     const reconciled = await reconcileDispatchedRoadmap(env.DB);
 
     const activeRow = await env.DB.prepare(
@@ -325,7 +329,7 @@ export async function governorCycle(env: GovernorEnv): Promise<GovernorCycleResu
       const action = `provider-cooldown-${Math.ceil(cooldownMs/1000)}s`;
       await setState(env.DB,"last_governor_action",action);
       await setState(env.DB,"last_governor_at",new Date().toISOString());
-      return { enabled:true,materialized:0,enqueued:0,active:0,action,reconciled };
+      return { enabled:true,materialized:0,enqueued:0,active:0,action,reconciled,projectFeeder };
     }
 
     let materialized = 0;
@@ -354,7 +358,7 @@ export async function governorCycle(env: GovernorEnv): Promise<GovernorCycleResu
        VALUES ('governor_cycle',?,?, 'factory')`
     ).bind(materialized + enqueued, action).run();
 
-    return { enabled: true, materialized, enqueued, active, action, reconciled };
+    return { enabled: true, materialized, enqueued, active, action, reconciled, projectFeeder };
   } finally {
     await releaseLock(env.DB, owner);
   }

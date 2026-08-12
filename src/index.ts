@@ -1,6 +1,8 @@
 import { ensureSchema } from "./schema";
 import { governorCycle, seedRoadmap, setContinuous, recoverStaleJobs } from "./governor";
 import { getRepo } from "./providers/github";
+import { projectFeederCycle } from "./project/feeder";
+import { dashboardHtml } from "./dashboard/html";
 export { FactoryWorkflow } from "./workflow";
 
 type Env = {
@@ -35,12 +37,16 @@ function authorized(request: Request, env: Env): boolean {
   return header === `Bearer ${env.FACTORY_ADMIN_TOKEN}`;
 }
 
+let phaseMarked = false;
+
 async function markPhase(db: D1Database): Promise<void> {
+  if (phaseMarked) return;
   await db.prepare(
     `INSERT INTO PROJECT_STATE(key,value,updated_at)
-     VALUES ('factory_phase','project-writer',CURRENT_TIMESTAMP)
+     VALUES ('factory_phase','production-loop-dashboard',CURRENT_TIMESTAMP)
      ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP`
   ).run();
+  phaseMarked = true;
 }
 
 async function jobDetail(db: D1Database, jobId: string) {
@@ -115,7 +121,19 @@ async function restartDispatchedRoadmapJob(env: Env, roadmapId: string): Promise
     await env.DB.prepare(`UPDATE FACTORY_ROADMAP SET status='ready',work_queue_id=NULL,result_summary='Restarted after QA contract patch',updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(roadmapId).run();
     return { restarted:true,roadmapId,reason:"missing_job_reset_to_ready" };
   }
-  if (job.status === "completed") return { restarted:false,roadmapId,jobId:job.id,reason:"job_completed" };
+  if (job.status === "completed") {
+    const closedProductPr = await env.DB.prepare(
+      `SELECT id FROM PROJECT_IMPACT WHERE job_id=? AND status='closed-unmerged' LIMIT 1`
+    ).bind(job.id).first<{id:string}>();
+    if (roadmap.status === "quarantine" && closedProductPr) {
+      await env.DB.batch([
+        env.DB.prepare(`UPDATE FACTORY_ROADMAP SET status='ready',work_queue_id=NULL,result_summary='Retry requested after product PR closed without merge',updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(roadmapId),
+        env.DB.prepare(`INSERT INTO JOB_DECISIONS(job_id,decision_type,actor_role,data_json) VALUES (?,'ADMIN_RETRY_CLOSED_PR','Governor',?)`).bind(job.id,JSON.stringify({roadmapId,impactId:closedProductPr.id}))
+      ]);
+      return {restarted:true,roadmapId,jobId:job.id,reason:"closed_product_pr_reset_to_ready"};
+    }
+    return { restarted:false,roadmapId,jobId:job.id,reason:"job_completed" };
+  }
 
   let terminated = false;
   if (job.workflow_instance_id && ["running","queued","verify"].includes(job.status)) {
@@ -148,48 +166,80 @@ async function restartDispatchedRoadmapJob(env: Env, roadmapId: string): Promise
 }
 
 async function factorySnapshot(db: D1Database) {
-  const state = await db.prepare(`SELECT key,value,updated_at FROM PROJECT_STATE ORDER BY key`).all();
-  const queue = await db.prepare(
-    `SELECT status,COUNT(*) AS count FROM WORK_QUEUE GROUP BY status ORDER BY status`
-  ).all();
+  const state = await db.prepare(`SELECT key,value,updated_at FROM PROJECT_STATE ORDER BY key`).all<{key:string;value:string;updated_at:string}>();
+  const queue = await db.prepare(`SELECT status,COUNT(*) AS count FROM WORK_QUEUE GROUP BY status ORDER BY status`).all();
   const roadmap = await db.prepare(
-    `SELECT id,sequence_no,title,agent_role,status,work_queue_id,result_summary,updated_at
+    `SELECT id,sequence_no,title,job_type,agent_role,objective,status,work_queue_id,result_summary,updated_at
      FROM FACTORY_ROADMAP ORDER BY sequence_no`
   ).all();
   const recentReviews = await db.prepare(
-    `SELECT job_id,reviewer_model,attempt_no,decision,score,created_at
-     FROM QUALITY_REVIEWS ORDER BY created_at DESC LIMIT 20`
+    `SELECT q.job_id,q.reviewer_model,q.attempt_no,q.decision,q.score,q.created_at,r.title AS roadmap_title
+     FROM QUALITY_REVIEWS q LEFT JOIN FACTORY_ROADMAP r ON r.work_queue_id=q.job_id
+     ORDER BY q.created_at DESC LIMIT 30`
   ).all();
   const blockers = await db.prepare(
-    `SELECT id,severity,status,summary,details,created_at,updated_at
-     FROM BLOCKERS WHERE status='open' ORDER BY created_at DESC LIMIT 20`
+    `SELECT id,severity,status,summary,details,created_at,updated_at FROM BLOCKERS
+     WHERE status='open' ORDER BY created_at DESC LIMIT 30`
   ).all();
-  const activeJobs = await db.prepare(
-    `SELECT id,job_type,status,workflow_instance_id,started_at,updated_at,error_text
-     FROM WORK_QUEUE WHERE status IN ('running','verify') ORDER BY updated_at ASC LIMIT 10`
-  ).all();
+  const activeRaw = await db.prepare(
+    `SELECT w.id,w.job_type,w.status,w.payload_json,w.workflow_instance_id,w.started_at,w.updated_at,w.error_text,
+            r.title AS roadmap_title,r.agent_role,
+            (SELECT e.message FROM RUN_EVENTS e JOIN RUNS rr ON rr.id=e.run_id WHERE rr.job_id=w.id ORDER BY e.created_at DESC LIMIT 1) AS latest_event
+     FROM WORK_QUEUE w LEFT JOIN FACTORY_ROADMAP r ON r.work_queue_id=w.id
+     WHERE w.status IN ('running','verify') ORDER BY w.updated_at ASC LIMIT 10`
+  ).all<Record<string,unknown>>();
+  const activeJobs = activeRaw.results.map(row => {
+    let payload: Record<string,unknown> = {};
+    try { payload = JSON.parse(String(row.payload_json ?? "{}")); } catch { payload = {}; }
+    return { ...row, payload_json:undefined, agent_role:row.agent_role ?? payload.agentRole ?? null, roadmap_title:row.roadmap_title ?? payload.roadmapTitle ?? null };
+  });
   const recentEvents = await db.prepare(
-    `SELECT re.run_id,re.event_type,re.message,re.created_at,r.job_id
-     FROM RUN_EVENTS re LEFT JOIN RUNS r ON r.id=re.run_id
-     ORDER BY re.created_at DESC LIMIT 30`
+    `SELECT re.run_id,re.event_type,re.message,re.created_at,r.job_id,fr.title AS roadmap_title
+     FROM RUN_EVENTS re
+     LEFT JOIN RUNS r ON r.id=re.run_id
+     LEFT JOIN FACTORY_ROADMAP fr ON fr.work_queue_id=r.job_id
+     ORDER BY re.created_at DESC LIMIT 50`
   ).all();
   const repos = await db.prepare(
     `SELECT alias,repo_full_name,default_branch,write_mode,enabled,last_checked_at,last_error,updated_at FROM PROJECT_REPOS ORDER BY alias`
   ).all();
   const githubOperations = await db.prepare(
-    `SELECT id,job_id,repo_full_name,operation,branch_name,pr_number,status,data_json,created_at,updated_at FROM GITHUB_OPERATIONS ORDER BY created_at DESC LIMIT 20`
+    `SELECT id,job_id,repo_full_name,operation,branch_name,pr_number,status,data_json,created_at,updated_at
+     FROM GITHUB_OPERATIONS ORDER BY created_at DESC LIMIT 30`
   ).all();
+  const impact = await db.prepare(
+    `SELECT id,roadmap_id,job_id,impact_area,repo_full_name,branch_name,pr_number,pr_url,status,summary,files_json,qa_score,created_at,updated_at
+     FROM PROJECT_IMPACT ORDER BY created_at DESC LIMIT 40`
+  ).all();
+  const todayImpact = await db.prepare(
+    `SELECT id,roadmap_id,job_id,impact_area,repo_full_name,branch_name,pr_number,pr_url,status,summary,files_json,qa_score,created_at,updated_at
+     FROM PROJECT_IMPACT WHERE date(created_at)=date('now') ORDER BY created_at DESC LIMIT 40`
+  ).all();
+  const feedLog = await db.prepare(
+    `SELECT action,roadmap_id,detail_json,created_at FROM PROJECT_FEED_LOG ORDER BY created_at DESC LIMIT 30`
+  ).all();
+  const agents = await db.prepare(
+    `SELECT id,role,provider,model,enabled,updated_at FROM AGENTS WHERE enabled=1 ORDER BY role`
+  ).all();
+  const todayRow = await db.prepare(
+    `SELECT
+       SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) AS completed,
+       SUM(CASE WHEN status='merged' THEN 1 ELSE 0 END) AS merged,
+       SUM(CASE WHEN status='waiting-human' THEN 1 ELSE 0 END) AS waiting_human,
+       COUNT(*) AS total
+     FROM PROJECT_IMPACT WHERE date(created_at)=date('now')`
+  ).first<{completed:number|null;merged:number|null;waiting_human:number|null;total:number|null}>();
+  const meta = await db.prepare(`SELECT key,value FROM FACTORY_META ORDER BY key`).all<{key:string;value:string}>();
+  const stateMap = Object.fromEntries(state.results.map(x=>[x.key,x.value]));
+  const metaMap = Object.fromEntries(meta.results.map(x=>[x.key,x.value]));
 
   return {
-    state: state.results,
-    queue: queue.results,
-    roadmap: roadmap.results,
-    recentReviews: recentReviews.results,
-    blockers: blockers.results,
-    activeJobs: activeJobs.results,
-    recentEvents: recentEvents.results,
-    repos: repos.results,
-    githubOperations: githubOperations.results
+    version:metaMap.factory_version ?? "0.6.0",
+    state:state.results,stateMap,
+    queue:queue.results,roadmap:roadmap.results,recentReviews:recentReviews.results,blockers:blockers.results,
+    activeJobs,recentEvents:recentEvents.results,repos:repos.results,githubOperations:githubOperations.results,
+    impact:impact.results,todayImpact:todayImpact.results,feedLog:feedLog.results,agents:agents.results,
+    today:{completed:Number(todayRow?.completed??0),merged:Number(todayRow?.merged??0),waitingHuman:Number(todayRow?.waiting_human??0),total:Number(todayRow?.total??0)}
   };
 }
 
@@ -204,24 +254,32 @@ export default {
       return json({
         ok: true,
         service: "zihin-factory-governor",
-        phase: "project-writer",
+        phase: "production-loop-dashboard",
         time: new Date().toISOString(),
         meta: meta.results
       });
+    }
+
+    if (request.method === "GET" && url.pathname === "/dashboard") {
+      return new Response(dashboardHtml(),{headers:{
+        "content-type":"text/html; charset=utf-8","cache-control":"no-store","referrer-policy":"no-referrer",
+        "x-frame-options":"DENY","x-content-type-options":"nosniff",
+        "content-security-policy":"default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+      }});
     }
 
     if (!authorized(request, env)) {
       return json({ ok:false,error:"unauthorized" }, { status:401 });
     }
 
-    if (request.method === "GET" && url.pathname === "/status") {
+    if (request.method === "GET" && (url.pathname === "/status" || url.pathname === "/dashboard/api")) {
       const snapshot = await factorySnapshot(env.DB);
-      return json({ ok:true,...snapshot });
+      return json({ ok:true,phase:"production-loop-dashboard",...snapshot });
     }
 
     if (request.method === "GET" && url.pathname === "/factory") {
       const snapshot = await factorySnapshot(env.DB);
-      return json({ ok:true,phase:"project-writer",...snapshot });
+      return json({ ok:true,phase:"production-loop-dashboard",...snapshot });
     }
 
     if (request.method === "GET" && url.pathname === "/github/status") {
@@ -252,7 +310,7 @@ export default {
       for (const [alias,value] of pairs) {
         if (!value) continue;
         if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value)) return json({ok:false,error:`invalid_repo:${alias}`},{status:400});
-        await env.DB.prepare(`INSERT INTO PROJECT_REPOS(alias,repo_full_name,write_mode,enabled,updated_at) VALUES (?,?,'pr-only',1,CURRENT_TIMESTAMP) ON CONFLICT(alias) DO UPDATE SET repo_full_name=excluded.repo_full_name,write_mode='pr-only',enabled=1,updated_at=CURRENT_TIMESTAMP`).bind(alias,value).run();
+        await env.DB.prepare(`INSERT INTO PROJECT_REPOS(alias,repo_full_name,write_mode,enabled,updated_at) VALUES (?,?,'pr-only',1,CURRENT_TIMESTAMP) ON CONFLICT(alias) DO UPDATE SET repo_full_name=excluded.repo_full_name,default_branch=NULL,write_mode='pr-only',enabled=1,last_checked_at=NULL,last_error=NULL,updated_at=CURRENT_TIMESTAMP`).bind(alias,value).run();
       }
       const rows = await env.DB.prepare(`SELECT alias,repo_full_name,write_mode,enabled FROM PROJECT_REPOS ORDER BY alias`).all();
       return json({ok:true,repos:rows.results});
@@ -317,6 +375,12 @@ export default {
       return json({ ok:true,restart,cycle });
     }
 
+    if (request.method === "POST" && url.pathname === "/admin/project-feed") {
+      const feeder = await projectFeederCycle(env);
+      const cycle = await governorCycle(env);
+      return json({ok:true,feeder,cycle});
+    }
+
     if (request.method === "POST" && url.pathname === "/admin/recover-stale") {
       const recovery = await recoverStaleJobs(env,2);
       const cycle = await governorCycle(env);
@@ -348,9 +412,11 @@ export default {
     return json({
       ok:true,
       service:"zihin-factory-governor",
-      phase:"project-writer",
+      phase:"production-loop-dashboard",
       routes:[
         "GET /health (public)",
+        "GET /dashboard (public shell; token entered in browser)",
+        "GET /dashboard/api (Bearer token)",
         "GET /factory (Bearer token)",
         "GET /status (Bearer token)",
         "GET /github/status (Bearer token)",
@@ -363,6 +429,7 @@ export default {
         "POST /admin/github/configure (Bearer token)",
         "POST /admin/github-smoke (Bearer token)",
         "POST /admin/restart-roadmap-job (Bearer token)",
+        "POST /admin/project-feed (Bearer token)",
         "POST /admin/recover-stale (Bearer token)",
         "POST /admin/cycle (Bearer token)"
       ]

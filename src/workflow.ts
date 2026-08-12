@@ -3,7 +3,8 @@ import { runNvidiaText } from "./providers/nvidia";
 import { sendTelegram } from "./notifications/telegram";
 import { routeAgent } from "./agents/router";
 import { reviewOutput, type QualityReview } from "./quality/gate";
-import { createProjectDraftPr } from "./providers/github";
+import { createProjectDraftPr, getRepo, getRepoTree, getTextFile } from "./providers/github";
+import { candidateRepoPaths, parsePathSelection, parseAndApplyPatchProposal, patchReviewArtifact } from "./project/repo-tools";
 
 export type FactoryJobParams = { jobId: string };
 
@@ -190,7 +191,168 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
         return { jobId,runId,result };
       }
 
+      if (job.job_type === "product.code-patch") {
+        const payload = safeJson(job.payload_json) as AutonomousPayload & Record<string, unknown>;
+        const objective = String(payload.objective ?? "Prepare the smallest safe production patch from live repository evidence.");
+        const acceptanceCriteria = Array.isArray(payload.acceptanceCriteria) ? payload.acceptanceCriteria.map(String) : [];
+        const repoAlias = String(payload.repoAlias ?? "product");
+        const focus = String(payload.focus ?? objective);
+        const impactArea = String(payload.impactArea ?? "Zihin Arenası");
+        const maxFiles = Math.max(1,Math.min(2,Number(payload.maxFiles ?? 2)));
+        const roadmapId = typeof payload.roadmapId === "string" ? payload.roadmapId : null;
+        const roadmapTitle = String(payload.roadmapTitle ?? "Product code patch");
+
+        const repoRow = await step.do("product patch repo config", async () => this.env.DB.prepare(
+          `SELECT alias,repo_full_name,default_branch,write_mode,enabled FROM PROJECT_REPOS WHERE alias=?`
+        ).bind(repoAlias).first<{alias:string;repo_full_name:string;default_branch:string|null;write_mode:string;enabled:number}>());
+        if (!repoRow || !repoRow.enabled) throw new Error(`product_repo_alias_unavailable:${repoAlias}`);
+        if (repoRow.write_mode !== "pr-only") throw new Error("product_repo_must_be_pr_only");
+
+        await step.do("product patch discovery started", async () => touchJob(this.env.DB,jobId,runId,"product_patch_discovery_started",`Reading live repo evidence from ${repoRow.repo_full_name}`));
+        const repoInfo = await step.do("product patch repo info", async () => getRepo(this.env,repoRow.repo_full_name));
+        const base = repoRow.default_branch || repoInfo.default_branch;
+        const tree = await step.do("product patch repo tree", async () => getRepoTree(this.env,repoRow.repo_full_name,base));
+        const candidates = candidateRepoPaths(tree,focus,140);
+        if (candidates.length === 0) throw new Error("product_patch_no_candidate_paths");
+
+        const selector = await step.do("product patch path selector", {retries:{limit:1,delay:"5 seconds",backoff:"exponential"}}, async () => runNvidiaText(this.env,{
+          system:"You are a repository path selector. Return strict JSON only. Never invent paths. Select existing files most likely to contain the requested implementation/test surface.",
+          prompt:`FOCUS:\n${focus}\n\nLIVE REPOSITORY PATH CANDIDATES:\n${candidates.map((x,i)=>`${i+1}. ${x}`).join("\n")}\n\nReturn exactly one JSON object: {"paths":["existing/path.ts", "existing/test.spec.ts"]}. Choose 4-8 paths.`,
+          maxTokens:340,temperature:0,purpose:"coder",onHeartbeat:() => providerHeartbeat(this.env.DB,jobId)
+        }));
+        const allowedCandidates = new Set(candidates);
+        let selected = parsePathSelection(selector.content,allowedCandidates,8);
+        if (selected.length < 2) selected = candidates.slice(0,Math.min(8,candidates.length));
+
+        const sources = await step.do("product patch read selected files", async () => {
+          const out: Array<{path:string;content:string}> = [];
+          let total = 0;
+          for (const path of selected) {
+            try {
+              const file = await getTextFile(this.env,repoRow.repo_full_name,path,base,24_000);
+              if (!file) continue;
+              if (total + file.content.length > 70_000) break;
+              total += file.content.length;
+              out.push({path:file.path,content:file.content});
+            } catch { /* oversized/non-text candidate is skipped */ }
+          }
+          return out;
+        });
+        if (sources.length === 0) throw new Error("product_patch_no_readable_source_files");
+        const sourceMap = new Map(sources.map(x=>[x.path,x.content]));
+        const evidence = sources.map(x=>`FILE ${x.path}\n<<<SOURCE\n${x.content}\nSOURCE`).join("\n\n");
+
+        const patchContract = `Return strict JSON only with this shape:\n{"summary":"what and why","verification":["exact repo command"],"changes":[{"path":"one of the supplied files","edits":[{"search":"exact unique existing snippet","replace":"complete replacement snippet"}]}]}\nRules: at most ${maxFiles} changed files; at most 4 exact edits per file; every search must be copied exactly from supplied source and must uniquely match; do not return full files; no markdown; no invented path; preserve existing language/framework; no placeholders; smallest safe patch.`;
+        const coderSystem = `You are the Codex Engineer inside Zihin Factory. Work only from live repository source supplied in this prompt. Never invent a file, API, type, import, test runner, or repository language. Preserve ECD+AIG architecture and game-as-adapter separation. Main branch is read-only; output is only a proposal until independent QA passes. ${patchContract}`;
+
+        let attempt = 1;
+        await step.do("product patch producer started", async () => touchJob(this.env.DB,jobId,runId,"product_patch_producer_started","Codex Engineer patch attempt 1 started"));
+        let producer = await step.do("product patch producer 1", {retries:{limit:1,delay:"7 seconds",backoff:"exponential"}}, async () => runNvidiaText(this.env,{
+          system:coderSystem,
+          prompt:`OBJECTIVE:\n${objective}\n\nACCEPTANCE CRITERIA:\n${acceptanceCriteria.map((x,i)=>`${i+1}. ${x}`).join("\n")}\n\nFOCUS:\n${focus}\n\nLIVE SOURCE FILES:\n${evidence}\n\nProduce the smallest concrete patch now.`,
+          maxTokens:1200,temperature:0.05,purpose:"coder",onHeartbeat:() => providerHeartbeat(this.env.DB,jobId)
+        }));
+        let proposal = parseAndApplyPatchProposal(producer.content,sourceMap,maxFiles);
+        let reviewArtifact = patchReviewArtifact(proposal);
+        await step.do("product patch proposal persisted 1", async () => this.env.DB.prepare(
+          `INSERT INTO ARTIFACTS(id,job_id,kind,name,metadata_json) VALUES (?,?,'code-patch-proposal','Product code patch attempt 1',?)`
+        ).bind(crypto.randomUUID(),jobId,JSON.stringify({model:producer.model,attempt,summary:proposal.summary,files:proposal.changes.map(x=>({path:x.path,editCount:x.editCount})),verification:proposal.verification,rawProposal:producer.content.slice(0,9000)})).run());
+
+        await step.do("product patch qa started 1", async () => touchJob(this.env.DB,jobId,runId,"product_patch_qa_started","Independent code patch QA attempt 1 started"));
+        let review = await step.do("product patch qa 1", {retries:{limit:1,delay:"6 seconds",backoff:"exponential"}}, async () => reviewOutput(this.env,{
+          objective,acceptanceCriteria,producerRole:"Codex Engineer",producerModel:producer.model,output:reviewArtifact,attempt,onHeartbeat:() => providerHeartbeat(this.env.DB,jobId)
+        }));
+        await step.do("product patch record qa 1", async () => recordQuality(this.env.DB,{jobId,runId,producerModel:producer.model,attemptNo:attempt,review}));
+        await step.do("product patch qa completed 1", async () => touchJob(this.env.DB,jobId,runId,"product_patch_qa_completed",`Independent code patch QA: ${review.decision} ${review.score}/100`));
+
+        if (review.decision === "RETRY") {
+          attempt = 2;
+          await step.do("product patch revision started", async () => touchJob(this.env.DB,jobId,runId,"product_patch_revision_started","Codex Engineer patch revision 2 started"));
+          producer = await step.do("product patch producer 2", {retries:{limit:1,delay:"7 seconds",backoff:"exponential"}}, async () => runNvidiaText(this.env,{
+            system:coderSystem,
+            prompt:`OBJECTIVE:\n${objective}\n\nACCEPTANCE CRITERIA:\n${acceptanceCriteria.map((x,i)=>`${i+1}. ${x}`).join("\n")}\n\nQA REVISION INSTRUCTIONS:\n${review.revisionInstructions || review.reasons.join("; ")}\n\nPREVIOUS PATCH JSON:\n${producer.content}\n\nLIVE SOURCE FILES (authoritative):\n${evidence}\n\nReturn a complete corrected patch JSON.`,
+            maxTokens:1200,temperature:0.03,purpose:"coder",preferredModels:[producer.model],onHeartbeat:() => providerHeartbeat(this.env.DB,jobId)
+          }));
+          proposal = parseAndApplyPatchProposal(producer.content,sourceMap,maxFiles);
+          reviewArtifact = patchReviewArtifact(proposal);
+          await step.do("product patch proposal persisted 2", async () => this.env.DB.prepare(
+            `INSERT INTO ARTIFACTS(id,job_id,kind,name,metadata_json) VALUES (?,?,'code-patch-proposal','Product code patch attempt 2',?)`
+          ).bind(crypto.randomUUID(),jobId,JSON.stringify({model:producer.model,attempt,summary:proposal.summary,files:proposal.changes.map(x=>({path:x.path,editCount:x.editCount})),verification:proposal.verification,rawProposal:producer.content.slice(0,9000)})).run());
+          review = await step.do("product patch qa 2", {retries:{limit:1,delay:"6 seconds",backoff:"exponential"}}, async () => reviewOutput(this.env,{
+            objective,acceptanceCriteria,producerRole:"Codex Engineer",producerModel:producer.model,output:reviewArtifact,attempt,onHeartbeat:() => providerHeartbeat(this.env.DB,jobId)
+          }));
+          await step.do("product patch record qa 2", async () => recordQuality(this.env.DB,{jobId,runId,producerModel:producer.model,attemptNo:attempt,review}));
+          await step.do("product patch qa completed 2", async () => touchJob(this.env.DB,jobId,runId,"product_patch_qa_completed",`Independent code patch QA revision: ${review.decision} ${review.score}/100`));
+        }
+
+        if (review.decision === "PASS") {
+          await step.do("product patch github heartbeat", async () => touchJob(this.env.DB,jobId,runId,"product_patch_github_started",`QA PASS; creating Draft PR in ${repoRow.repo_full_name}`));
+          const pr = await step.do("product patch create draft pr", {retries:{limit:1,delay:"8 seconds",backoff:"exponential"}}, async () => createProjectDraftPr(this.env,{
+            repo:repoRow.repo_full_name,jobId,title:roadmapTitle,summary:`${proposal.summary}\n\nVerification:\n${proposal.verification.map(x=>`- ${x}`).join("\n")}\n\nIndependent QA: ${review.score}/100.`,baseBranch:base,
+            changes:proposal.changes.map(x=>({path:x.path,content:x.content}))
+          }));
+          const result = {ok:true,kind:"product.code-patch",roadmapId,impactArea,qa:review,summary:proposal.summary,verification:proposal.verification,files:proposal.changes.map(x=>x.path),...pr};
+          const resultJson = JSON.stringify(result);
+          await step.do("product patch persist pr", async () => {
+            const impactId = crypto.randomUUID();
+            const statements = [
+              this.env.DB.prepare(`UPDATE WORK_QUEUE SET status='completed',result_json=?,error_text=NULL,completed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(resultJson,jobId),
+              this.env.DB.prepare(`UPDATE RUNS SET status='completed',result_json=?,completed_at=CURRENT_TIMESTAMP WHERE id=?`).bind(resultJson,runId),
+              this.env.DB.prepare(`INSERT INTO GITHUB_OPERATIONS(id,job_id,repo_full_name,operation,branch_name,pr_number,status,data_json) VALUES (?,?,?,'CREATE_PRODUCT_DRAFT_PR',?,?,'waiting-human',?)`).bind(crypto.randomUUID(),jobId,pr.repo,pr.branch,pr.prNumber,JSON.stringify(pr)),
+              this.env.DB.prepare(`INSERT INTO PROJECT_IMPACT(id,roadmap_id,job_id,impact_area,repo_full_name,branch_name,pr_number,pr_url,status,summary,files_json,qa_score) VALUES (?,?,?,?,?,?,?,?, 'waiting-human',?,?,?)`).bind(impactId,roadmapId,jobId,impactArea,pr.repo,pr.branch,pr.prNumber,pr.prUrl,proposal.summary,JSON.stringify(proposal.changes.map(x=>x.path)),review.score),
+              this.env.DB.prepare(`INSERT INTO RUN_EVENTS(run_id,event_type,message,data_json) VALUES (?,'product_draft_pr_created',?,?)`).bind(runId,`Product Draft PR #${pr.prNumber} created; waiting for human/CI merge gate`,JSON.stringify(pr))
+            ];
+            if (roadmapId) statements.push(this.env.DB.prepare(`UPDATE FACTORY_ROADMAP SET status='waiting-human',result_summary=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(`Draft PR #${pr.prNumber} waiting merge: ${proposal.summary}`.slice(0,1000),roadmapId));
+            await this.env.DB.batch(statements);
+          });
+          await notifyBestEffort(this.env,`🧑‍💻 Zihin Factory ürün PR hazır\n${impactArea}\nQA: ${review.score}/100\n${pr.prUrl}\nMerge edilene kadar sonraki bağımlı patch bekleyecek.`);
+          await wakeGovernor(this.env,"product-pr-waiting-human");
+          return {jobId,runId,result};
+        }
+
+        const finalDecision = review.decision === "BLOCKED" ? "blocked" : "quarantine";
+        const finalReview = review.decision === "RETRY" ? {...review,decision:"QUARANTINE" as const,reasons:[...review.reasons,"product_patch_revision_budget_exhausted"]} : review;
+        const result = {ok:false,kind:"product.code-patch",roadmapId,impactArea,qa:finalReview,summary:proposal.summary,verification:proposal.verification,files:proposal.changes.map(x=>x.path)};
+        const resultJson = JSON.stringify(result);
+        await step.do("product patch fail closed", async () => {
+          const statements = [
+            this.env.DB.prepare(`UPDATE WORK_QUEUE SET status=?,result_json=?,error_text=?,completed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(finalDecision,resultJson,finalReview.reasons.join("; ").slice(0,3000),jobId),
+            this.env.DB.prepare(`UPDATE RUNS SET status=?,result_json=?,completed_at=CURRENT_TIMESTAMP WHERE id=?`).bind(finalDecision,resultJson,runId),
+            this.env.DB.prepare(`INSERT INTO PROJECT_IMPACT(id,roadmap_id,job_id,impact_area,repo_full_name,status,summary,files_json,qa_score) VALUES (?,?,?,?,?,?,?, ?,?)`).bind(crypto.randomUUID(),roadmapId,jobId,impactArea,repoRow.repo_full_name,finalDecision,`Patch not written: ${finalReview.reasons.join("; ")}`.slice(0,1000),JSON.stringify(proposal.changes.map(x=>x.path)),finalReview.score)
+          ];
+          if (roadmapId) statements.push(this.env.DB.prepare(`UPDATE FACTORY_ROADMAP SET status=?,result_summary=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(finalDecision,finalReview.reasons.join("; ").slice(0,1000),roadmapId));
+          await this.env.DB.batch(statements);
+        });
+        await notifyBestEffort(this.env,`🟠 Zihin Factory ürün patch fail-closed\n${roadmapTitle}\n${finalReview.decision} ${finalReview.score}/100`);
+        await wakeGovernor(this.env,"product-patch-fail-closed");
+        return {jobId,runId,result};
+      }
+
       const payload = safeJson(job.payload_json) as AutonomousPayload & Record<string, unknown>;
+      let runtimeContext: unknown = payload.context ?? {};
+      let reconRepoFullName: string | null = null;
+      if (job.job_type === "product.repo-recon") {
+        const repoAlias = String(payload.repoAlias ?? "product");
+        const focus = String(payload.focus ?? payload.objective ?? "Zihin Arenası repository architecture");
+        const repoRow = await step.do("recon repo config", async () => this.env.DB.prepare(
+          `SELECT repo_full_name,default_branch,enabled FROM PROJECT_REPOS WHERE alias=?`
+        ).bind(repoAlias).first<{repo_full_name:string;default_branch:string|null;enabled:number}>());
+        if (!repoRow || !repoRow.enabled) throw new Error(`recon_repo_alias_unavailable:${repoAlias}`);
+        const repoInfo = await step.do("recon repo info", async () => getRepo(this.env,repoRow.repo_full_name));
+        const base = repoRow.default_branch || repoInfo.default_branch;
+        reconRepoFullName = repoRow.repo_full_name;
+        const tree = await step.do("recon repo tree", async () => getRepoTree(this.env,repoRow.repo_full_name,base));
+        const relevantPaths = candidateRepoPaths(tree,focus,160);
+        const anchorFiles = await step.do("recon anchor files", async () => {
+          const out: Record<string,string> = {};
+          for (const path of ["PROJECT_STATE.json","package.json","CONTINUE_CONTEXT.txt"]) {
+            try { const f = await getTextFile(this.env,repoRow.repo_full_name,path,base,28_000); if (f) out[path]=f.content; } catch { /* optional anchor */ }
+          }
+          return out;
+        });
+        runtimeContext = {repo:repoRow.repo_full_name,defaultBranch:base,private:repoInfo.private,focus,relevantLivePaths:relevantPaths,anchorFiles};
+        await step.do("recon evidence ready", async () => touchJob(this.env.DB,jobId,runId,"repo_recon_evidence_ready",`Live repo evidence loaded: ${relevantPaths.length} candidate paths`));
+      }
       const objective = String(payload.objective ?? "Complete the assigned factory task with implementation-ready detail.");
       const acceptanceCriteria = Array.isArray(payload.acceptanceCriteria)
         ? payload.acceptanceCriteria.map(String)
@@ -205,7 +367,7 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
         { retries:{ limit:1,delay:"8 seconds",backoff:"exponential" } },
         async () => runNvidiaText(this.env,{
           system:routed.systemPrompt,
-          prompt:`OBJECTIVE:\n${objective}\n\nACCEPTANCE CRITERIA:\n${acceptanceCriteria.map((x,i)=>`${i+1}. ${x}`).join("\n") || "1. Materially satisfy the objective."}\n\nCONTEXT:\n${JSON.stringify(payload.context ?? {},null,2)}\n\nProduce the artifact now.`,
+          prompt:`OBJECTIVE:\n${objective}\n\nACCEPTANCE CRITERIA:\n${acceptanceCriteria.map((x,i)=>`${i+1}. ${x}`).join("\n") || "1. Materially satisfy the objective."}\n\nCONTEXT:\n${JSON.stringify(runtimeContext,null,2)}\n\nProduce the artifact now.`,
           maxTokens:1050,
           temperature:0.15,
           purpose:routed.purpose,
@@ -326,6 +488,11 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
           ];
           if (roadmapId) statements.push(
             this.env.DB.prepare(`UPDATE FACTORY_ROADMAP SET status='done',result_summary=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(producer.content.slice(0,1000),roadmapId)
+          );
+          if (job.job_type === "product.repo-recon") statements.push(
+            this.env.DB.prepare(`INSERT INTO PROJECT_IMPACT(id,roadmap_id,job_id,impact_area,repo_full_name,status,summary,files_json,qa_score) VALUES (?,?,?,?,?,'completed',?,?,?)`).bind(
+              crypto.randomUUID(),roadmapId,jobId,String(payload.impactArea ?? "Repo Keşfi"),reconRepoFullName ?? String(payload.repoAlias ?? "product"),producer.content.slice(0,1000),JSON.stringify([]),review.score
+            )
           );
           await this.env.DB.batch(statements);
         });

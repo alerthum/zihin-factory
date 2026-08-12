@@ -31,3 +31,4 @@ declare interface WorkflowInstance { id:string; status():Promise<WorkflowInstanc
 declare class TextDecoder { decode(input?: any, options?: {stream?: boolean}): string; }
 declare class TextEncoder { encode(input?: string): Uint8Array; }
 declare function btoa(input: string): string;
+declare function atob(input: string): string;

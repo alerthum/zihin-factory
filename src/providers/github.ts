@@ -10,9 +10,29 @@ export type RepoInfo = {
 type FileInfo = { sha: string; content?: string; encoding?: string };
 
 type PullRequestInfo = { number: number; html_url: string; state: string; draft?: boolean; head?: { ref?: string }; base?: { ref?: string } };
+export type RepoTreeEntry = { path: string; type: "blob" | "tree"; sha: string; size?: number };
+
+export type PullRequestState = {
+  number: number;
+  state: string;
+  draft?: boolean;
+  merged?: boolean;
+  merged_at?: string | null;
+  html_url: string;
+  head?: { ref?: string };
+  base?: { ref?: string };
+};
+
+function base64ToUtf8(value: string): string {
+  const binary = atob(value.replace(/\n/g, ""));
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+}
+
 
 const API = "https://api.github.com";
-const UA = "zihin-factory-governor/0.5.0";
+const UA = "zihin-factory-governor/0.6.0";
 
 function assertToken(env: GitHubEnv): string {
   const token = String(env.GITHUB_TOKEN ?? "").trim();
@@ -193,4 +213,30 @@ export async function createProjectDraftPr(
   });
 
   return { repo: input.repo, branch, base, prNumber: pr.number, prUrl: pr.html_url, commitShas };
+}
+
+
+export async function getRepoTree(env: GitHubEnv, repo: string, ref: string): Promise<RepoTreeEntry[]> {
+  if (!validRepo(repo)) throw new Error("invalid_repo_name");
+  const data = await gh<{ tree?: Array<{ path?:string; type?:string; sha?:string; size?:number }>; truncated?:boolean }>(
+    env, `/repos/${repo}/git/trees/${encodeURIComponent(ref)}?recursive=1`
+  );
+  const entries = (data.tree ?? [])
+    .filter(x => x.path && x.sha && (x.type === "blob" || x.type === "tree"))
+    .map(x => ({ path:String(x.path), type:x.type as "blob"|"tree", sha:String(x.sha), ...(typeof x.size === "number" ? {size:x.size} : {}) }));
+  if (data.truncated && entries.length === 0) throw new Error("github_repo_tree_empty_truncated");
+  return entries;
+}
+
+export async function getTextFile(env: GitHubEnv, repo: string, path: string, ref: string, maxChars = 80_000): Promise<{ path:string; sha:string; content:string } | null> {
+  const file = await getFile(env,repo,path,ref);
+  if (!file || !file.content) return null;
+  const content = file.encoding === "base64" ? base64ToUtf8(file.content) : String(file.content);
+  if (content.length > maxChars) throw new Error(`github_text_file_too_large:${path}`);
+  return { path,sha:file.sha,content };
+}
+
+export async function getPullRequest(env: GitHubEnv, repo: string, prNumber: number): Promise<PullRequestState> {
+  if (!Number.isInteger(prNumber) || prNumber <= 0) throw new Error("invalid_pr_number");
+  return gh<PullRequestState>(env,`/repos/${repo}/pulls/${prNumber}`);
 }
