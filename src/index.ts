@@ -1,5 +1,6 @@
 import { ensureSchema } from "./schema";
 import { governorCycle, seedRoadmap, setContinuous, recoverStaleJobs } from "./governor";
+import { getRepo } from "./providers/github";
 export { FactoryWorkflow } from "./workflow";
 
 type Env = {
@@ -10,6 +11,7 @@ type Env = {
   NVIDIA_API_KEY: string;
   TELEGRAM_BOT_TOKEN: string;
   TELEGRAM_CHAT_ID: string;
+  GITHUB_TOKEN?: string;
 };
 
 type QueueMessage =
@@ -36,7 +38,7 @@ function authorized(request: Request, env: Env): boolean {
 async function markPhase(db: D1Database): Promise<void> {
   await db.prepare(
     `INSERT INTO PROJECT_STATE(key,value,updated_at)
-     VALUES ('factory_phase','autonomous-qa-contract-resilient',CURRENT_TIMESTAMP)
+     VALUES ('factory_phase','project-writer',CURRENT_TIMESTAMP)
      ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP`
   ).run();
 }
@@ -171,6 +173,12 @@ async function factorySnapshot(db: D1Database) {
      FROM RUN_EVENTS re LEFT JOIN RUNS r ON r.id=re.run_id
      ORDER BY re.created_at DESC LIMIT 30`
   ).all();
+  const repos = await db.prepare(
+    `SELECT alias,repo_full_name,default_branch,write_mode,enabled,last_checked_at,last_error,updated_at FROM PROJECT_REPOS ORDER BY alias`
+  ).all();
+  const githubOperations = await db.prepare(
+    `SELECT id,job_id,repo_full_name,operation,branch_name,pr_number,status,data_json,created_at,updated_at FROM GITHUB_OPERATIONS ORDER BY created_at DESC LIMIT 20`
+  ).all();
 
   return {
     state: state.results,
@@ -179,7 +187,9 @@ async function factorySnapshot(db: D1Database) {
     recentReviews: recentReviews.results,
     blockers: blockers.results,
     activeJobs: activeJobs.results,
-    recentEvents: recentEvents.results
+    recentEvents: recentEvents.results,
+    repos: repos.results,
+    githubOperations: githubOperations.results
   };
 }
 
@@ -194,7 +204,7 @@ export default {
       return json({
         ok: true,
         service: "zihin-factory-governor",
-        phase: "autonomous-qa-contract-resilient",
+        phase: "project-writer",
         time: new Date().toISOString(),
         meta: meta.results
       });
@@ -211,7 +221,58 @@ export default {
 
     if (request.method === "GET" && url.pathname === "/factory") {
       const snapshot = await factorySnapshot(env.DB);
-      return json({ ok:true,phase:"autonomous-qa-contract-resilient",...snapshot });
+      return json({ ok:true,phase:"project-writer",...snapshot });
+    }
+
+    if (request.method === "GET" && url.pathname === "/github/status") {
+      const repos = await env.DB.prepare(`SELECT alias,repo_full_name,default_branch,write_mode,enabled,last_checked_at,last_error FROM PROJECT_REPOS ORDER BY alias`).all<{ alias:string; repo_full_name:string; default_branch:string|null; write_mode:string; enabled:number; last_checked_at:string|null; last_error:string|null }>();
+      const secretConfigured = Boolean(String(env.GITHUB_TOKEN ?? "").trim());
+      const live: Array<Record<string, unknown>> = [];
+      if (secretConfigured) {
+        for (const row of repos.results) {
+          if (!row.enabled) continue;
+          try {
+            const info = await getRepo(env,row.repo_full_name);
+            live.push({ alias:row.alias,repo:info.full_name,defaultBranch:info.default_branch,private:info.private,permissions:info.permissions ?? null,ok:true });
+            await env.DB.prepare(`UPDATE PROJECT_REPOS SET default_branch=?,last_checked_at=CURRENT_TIMESTAMP,last_error=NULL,updated_at=CURRENT_TIMESTAMP WHERE alias=?`).bind(info.default_branch,row.alias).run();
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            live.push({ alias:row.alias,repo:row.repo_full_name,ok:false,error:message.slice(0,900) });
+            await env.DB.prepare(`UPDATE PROJECT_REPOS SET last_checked_at=CURRENT_TIMESTAMP,last_error=?,updated_at=CURRENT_TIMESTAMP WHERE alias=?`).bind(message.slice(0,1200),row.alias).run();
+          }
+        }
+      }
+      return json({ ok:true,secretConfigured,repos:repos.results,live });
+    }
+
+    if (request.method === "POST" && url.pathname === "/admin/github/configure") {
+      let body: { factoryRepo?:string; productRepo?:string };
+      try { body = await request.json(); } catch { return json({ok:false,error:"invalid_json"},{status:400}); }
+      const pairs = [["factory",body.factoryRepo],["product",body.productRepo]] as Array<[string,string|undefined]>;
+      for (const [alias,value] of pairs) {
+        if (!value) continue;
+        if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value)) return json({ok:false,error:`invalid_repo:${alias}`},{status:400});
+        await env.DB.prepare(`INSERT INTO PROJECT_REPOS(alias,repo_full_name,write_mode,enabled,updated_at) VALUES (?,?,'pr-only',1,CURRENT_TIMESTAMP) ON CONFLICT(alias) DO UPDATE SET repo_full_name=excluded.repo_full_name,write_mode='pr-only',enabled=1,updated_at=CURRENT_TIMESTAMP`).bind(alias,value).run();
+      }
+      const rows = await env.DB.prepare(`SELECT alias,repo_full_name,write_mode,enabled FROM PROJECT_REPOS ORDER BY alias`).all();
+      return json({ok:true,repos:rows.results});
+    }
+
+    if (request.method === "POST" && url.pathname === "/admin/github-smoke") {
+      if (!String(env.GITHUB_TOKEN ?? "").trim()) return json({ok:false,error:"github_token_not_configured"},{status:409});
+      const repo = await env.DB.prepare(`SELECT repo_full_name FROM PROJECT_REPOS WHERE alias='factory' AND enabled=1`).first<{repo_full_name:string}>();
+      if (!repo) return json({ok:false,error:"factory_repo_not_configured"},{status:409});
+      const jobId = crypto.randomUUID();
+      const path = `docs/factory-writer-smoke/${jobId}.md`;
+      const payload = {
+        repoAlias:"factory",
+        title:"GitHub Project Writer smoke test",
+        summary:"Validates PR-only GitHub write access from the durable Zihin Factory.",
+        changes:[{path,content:`# Zihin Factory GitHub Writer Smoke\n\nJob: ${jobId}\nCreated: ${new Date().toISOString()}\n\nThis draft PR proves branch + commit + PR-only write access. It may be closed after verification.\n`}]
+      };
+      await env.DB.prepare(`INSERT INTO WORK_QUEUE(id,job_type,status,priority,payload_json) VALUES (?,'github.project-pr','queued',5,?)`).bind(jobId,JSON.stringify(payload)).run();
+      await env.JOB_QUEUE.send({kind:"job",jobId,source:"github-smoke"} satisfies QueueMessage);
+      return json({ok:true,jobId,status:"queued",repo:repo.repo_full_name,path},{status:202});
     }
 
     if (request.method === "GET" && url.pathname === "/jobs") {
@@ -287,17 +348,20 @@ export default {
     return json({
       ok:true,
       service:"zihin-factory-governor",
-      phase:"autonomous-qa-contract-resilient",
+      phase:"project-writer",
       routes:[
         "GET /health (public)",
         "GET /factory (Bearer token)",
         "GET /status (Bearer token)",
+        "GET /github/status (Bearer token)",
         "GET /jobs (Bearer token)",
         "GET /jobs/:id (Bearer token)",
         "POST /jobs (Bearer token)",
         "POST /admin/seed-roadmap (Bearer token)",
         "POST /admin/start (Bearer token)",
         "POST /admin/pause (Bearer token)",
+        "POST /admin/github/configure (Bearer token)",
+        "POST /admin/github-smoke (Bearer token)",
         "POST /admin/restart-roadmap-job (Bearer token)",
         "POST /admin/recover-stale (Bearer token)",
         "POST /admin/cycle (Bearer token)"

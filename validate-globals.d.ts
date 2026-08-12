@@ -29,3 +29,5 @@ declare interface WorkflowInstanceStatus { status:string; error?:any; output?:an
 declare interface WorkflowInstance { id:string; status():Promise<WorkflowInstanceStatus>; terminate(options?:{rollback?:boolean}):Promise<void>; }
 
 declare class TextDecoder { decode(input?: any, options?: {stream?: boolean}): string; }
+declare class TextEncoder { encode(input?: string): Uint8Array; }
+declare function btoa(input: string): string;

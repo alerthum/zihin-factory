@@ -3,6 +3,7 @@ import { runNvidiaText } from "./providers/nvidia";
 import { sendTelegram } from "./notifications/telegram";
 import { routeAgent } from "./agents/router";
 import { reviewOutput, type QualityReview } from "./quality/gate";
+import { createProjectDraftPr } from "./providers/github";
 
 export type FactoryJobParams = { jobId: string };
 
@@ -12,6 +13,7 @@ type Env = {
   NVIDIA_API_KEY: string;
   TELEGRAM_BOT_TOKEN: string;
   TELEGRAM_CHAT_ID: string;
+  GITHUB_TOKEN?: string;
 };
 
 type QueueRow = {
@@ -151,6 +153,43 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
         return { jobId,runId,result };
       }
 
+      if (job.job_type === "github.project-pr") {
+        const payload = safeJson(job.payload_json) as Record<string, unknown>;
+        const repoAlias = String(payload.repoAlias ?? "product");
+        const repoRow = await step.do("load github repo config", async () => this.env.DB.prepare(
+          `SELECT alias,repo_full_name,default_branch,write_mode,enabled FROM PROJECT_REPOS WHERE alias=?`
+        ).bind(repoAlias).first<{ alias:string; repo_full_name:string; default_branch:string|null; write_mode:string; enabled:number }>());
+        if (!repoRow || !repoRow.enabled) throw new Error(`github_repo_alias_unavailable:${repoAlias}`);
+        if (repoRow.write_mode !== "pr-only") throw new Error(`github_write_mode_not_pr_only:${repoAlias}`);
+
+        const title = String(payload.title ?? "Factory project change");
+        const summary = String(payload.summary ?? "Autonomous factory project change prepared for human review.");
+        const rawChanges = Array.isArray(payload.changes) ? payload.changes : [];
+        const changes = rawChanges.map((x: any) => ({ path:String(x?.path ?? ""), content:String(x?.content ?? "") }));
+        if (changes.length === 0) throw new Error("github_project_pr_changes_required");
+
+        await step.do("github writer heartbeat", async () => touchJob(this.env.DB,jobId,runId,"github_write_started",`GitHub draft PR started for ${repoRow.repo_full_name}`));
+        const pr = await step.do("github create draft pr", { retries:{ limit:1,delay:"8 seconds",backoff:"exponential" } }, async () =>
+          createProjectDraftPr(this.env,{
+            repo:repoRow.repo_full_name,jobId,title,summary,baseBranch:repoRow.default_branch ?? undefined,changes
+          })
+        );
+        const result = { ok:true,kind:"github.project-pr",repoAlias,...pr };
+        const resultJson = JSON.stringify(result);
+        await step.do("persist github draft pr", async () => {
+          await this.env.DB.batch([
+            this.env.DB.prepare(`UPDATE WORK_QUEUE SET status='completed',result_json=?,error_text=NULL,completed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(resultJson,jobId),
+            this.env.DB.prepare(`UPDATE RUNS SET status='completed',result_json=?,completed_at=CURRENT_TIMESTAMP WHERE id=?`).bind(resultJson,runId),
+            this.env.DB.prepare(`INSERT INTO ARTIFACTS(id,job_id,kind,name,uri,metadata_json) VALUES (?,?,'github-pr',?,?,?)`).bind(crypto.randomUUID(),jobId,`Draft PR #${pr.prNumber}`,pr.prUrl,JSON.stringify(pr)),
+            this.env.DB.prepare(`INSERT INTO GITHUB_OPERATIONS(id,job_id,repo_full_name,operation,branch_name,pr_number,status,data_json) VALUES (?,?,?,'CREATE_DRAFT_PR',?,?,'completed',?)`).bind(crypto.randomUUID(),jobId,pr.repo,pr.branch,pr.prNumber,JSON.stringify(pr)),
+            this.env.DB.prepare(`INSERT INTO RUN_EVENTS(run_id,event_type,message,data_json) VALUES (?,'github_pr_created',?,?)`).bind(runId,`Draft PR #${pr.prNumber} created`,JSON.stringify(pr))
+          ]);
+        });
+        await notifyBestEffort(this.env,`🟣 Zihin Factory GitHub draft PR hazır\n${pr.repo} #${pr.prNumber}\n${pr.prUrl}`);
+        await wakeGovernor(this.env,"github-pr-completed");
+        return { jobId,runId,result };
+      }
+
       const payload = safeJson(job.payload_json) as AutonomousPayload & Record<string, unknown>;
       const objective = String(payload.objective ?? "Complete the assigned factory task with implementation-ready detail.");
       const acceptanceCriteria = Array.isArray(payload.acceptanceCriteria)
@@ -173,6 +212,7 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
           onHeartbeat:() => providerHeartbeat(this.env.DB,jobId)
         })
       );
+      const initialProducerModel = producer.model;
 
       await step.do("producer completed heartbeat 1", async () => touchJob(this.env.DB,jobId,runId,"producer_completed","Producer attempt 1 completed"));
       await step.do("persist producer artifact 1", async () => {
@@ -205,6 +245,7 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
             system:routed.systemPrompt,
             prompt:`Revise the artifact.\n\nOBJECTIVE:\n${objective}\n\nACCEPTANCE CRITERIA:\n${acceptanceCriteria.map((x,i)=>`${i+1}. ${x}`).join("\n")}\n\nQA REVISION INSTRUCTIONS:\n${instructions}\n\nPREVIOUS ARTIFACT:\n${previous}\n\nReturn the full corrected artifact, not a commentary about changes.`,
             maxTokens:1100,temperature:0.1,purpose:routed.purpose,
+            preferredModels:[initialProducerModel,"meta/llama-3.3-70b-instruct","mistralai/mistral-small-3.1-24b-instruct-2503"],
             onHeartbeat:() => providerHeartbeat(this.env.DB,jobId)
           })
         );
@@ -228,8 +269,38 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
         await step.do(`record quality ${attempt}`, async () => recordQuality(this.env.DB,{ jobId,runId,producerModel:producer.model,attemptNo:attempt,review }));
       }
 
+      if (review.decision === "RETRY" && review.score >= 75 && review.deterministicIssues.length === 0) {
+        attempt++;
+        const previous = producer.content;
+        const instructions = review.revisionInstructions || review.reasons.join("; ");
+        await step.do("supervisor escalation started", async () => touchJob(this.env.DB,jobId,runId,"supervisor_escalation_started",`Senior producer escalation attempt ${attempt} started`));
+        producer = await step.do(
+          "supervisor escalation producer",
+          { retries:{ limit:1,delay:"8 seconds",backoff:"exponential" } },
+          async () => runNvidiaText(this.env,{
+            system:`${routed.systemPrompt}\nSENIOR ESCALATION: Previous revisions were close but did not pass. Produce implementation-ready evidence for every acceptance criterion. Do not merely restate requirements.`,
+            prompt:`OBJECTIVE:\n${objective}\n\nACCEPTANCE CRITERIA:\n${acceptanceCriteria.map((x,i)=>`${i+1}. ${x}`).join("\n")}\n\nFINAL QA INSTRUCTIONS:\n${instructions}\n\nPREVIOUS ARTIFACT:\n${previous}\n\nReturn one complete, concrete corrected artifact.`,
+            maxTokens:1200,temperature:0.08,purpose:routed.purpose,
+            preferredModels:[initialProducerModel,"meta/llama-3.3-70b-instruct","mistralai/mistral-small-3.1-24b-instruct-2503"],
+            onHeartbeat:() => providerHeartbeat(this.env.DB,jobId)
+          })
+        );
+        await step.do("supervisor escalation producer completed", async () => touchJob(this.env.DB,jobId,runId,"supervisor_escalation_producer_completed",`Senior producer escalation attempt ${attempt} completed`));
+        await step.do("persist supervisor escalation artifact", async () => {
+          await this.env.DB.prepare(`INSERT INTO ARTIFACTS(id,job_id,kind,name,metadata_json) VALUES (?,?,'agent-output',?,?)`).bind(
+            crypto.randomUUID(),jobId,`${routed.role} senior escalation attempt ${attempt}`,JSON.stringify({role:routed.role,model:producer.model,attempt,content:producer.content,usage:producer.usage})
+          ).run();
+        });
+        review = await step.do("supervisor escalation qa", { retries:{ limit:1,delay:"6 seconds",backoff:"exponential" } }, async () => reviewOutput(this.env,{
+          objective,acceptanceCriteria,producerRole:routed.role,producerModel:producer.model,output:producer.content,attempt,
+          onHeartbeat:() => providerHeartbeat(this.env.DB,jobId)
+        }));
+        await step.do("supervisor escalation qa completed", async () => touchJob(this.env.DB,jobId,runId,"supervisor_escalation_qa_completed",`Senior escalation QA completed: ${review.decision} ${review.score}/100`));
+        await step.do("record supervisor escalation quality", async () => recordQuality(this.env.DB,{jobId,runId,producerModel:producer.model,attemptNo:attempt,review}));
+      }
+
       if (review.decision === "RETRY") {
-        review = { ...review,decision:"QUARANTINE",reasons:[...review.reasons,"revision_budget_exhausted"] };
+        review = { ...review,decision:"QUARANTINE",reasons:[...review.reasons,"revision_budget_exhausted_after_supervisor_escalation"] };
       }
 
       const roadmapId = typeof payload.roadmapId === "string" ? payload.roadmapId : null;

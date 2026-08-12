@@ -266,7 +266,7 @@ export async function seedRoadmap(db: D1Database): Promise<{ inserted: number }>
         "CI başarısızsa merge/release engellenmeli.",
         "Rollback ve audit trail bulunmalı."
       ],
-      deps: ["G8TR-NATIVE-QA-002"]
+      deps: []
     }
   ];
 
@@ -288,6 +288,12 @@ export async function seedRoadmap(db: D1Database): Promise<{ inserted: number }>
     ).run();
     if ((result.meta?.changes ?? 0) > 0) inserted++;
   }
+
+  // Infrastructure lane must not be blocked by a quarantined content-spec lane.
+  await db.prepare(
+    `UPDATE FACTORY_ROADMAP SET depends_on_json='[]',updated_at=CURRENT_TIMESTAMP WHERE id='GITHUB-WRITER-CONTRACT-003'`
+  ).run();
+
   return { inserted };
 }
 

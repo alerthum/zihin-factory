@@ -56,7 +56,8 @@ function isTextModel(id: string): boolean {
 function candidateOrder(
   ids: string[],
   purpose: NvidiaPurpose,
-  avoidModels: string[]
+  avoidModels: string[],
+  preferredModels: string[] = []
 ): string[] {
   const avoid = new Set(avoidModels);
   const preferred = purpose === "reviewer"
@@ -66,6 +67,9 @@ function candidateOrder(
       : PRODUCER_MODELS;
 
   const ordered: string[] = [];
+  for (const model of preferredModels) {
+    if (ids.includes(model) && !avoid.has(model) && !ordered.includes(model)) ordered.push(model);
+  }
   for (const model of preferred) {
     if (ids.includes(model) && !avoid.has(model) && !ordered.includes(model)) ordered.push(model);
   }
@@ -237,12 +241,13 @@ export async function runNvidiaText(
     temperature?: number;
     purpose?: NvidiaPurpose;
     avoidModels?: string[];
+    preferredModels?: string[];
     onHeartbeat?: () => Promise<void> | void;
   }
 ): Promise<NvidiaResult> {
   try { await input.onHeartbeat?.(); } catch { /* heartbeat is best effort */ }
   const ids = await listModels(env);
-  const candidates = candidateOrder(ids, input.purpose ?? "producer", input.avoidModels ?? []);
+  const candidates = candidateOrder(ids, input.purpose ?? "producer", input.avoidModels ?? [], input.preferredModels ?? []);
 
   if (candidates.length === 0) {
     throw new Error("NVIDIA API connected but no suitable text-generation model was found.");
