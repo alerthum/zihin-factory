@@ -81,6 +81,13 @@ async function wakeGovernor(env: Env, source: string): Promise<void> {
   }
 }
 
+async function touchJob(db: D1Database, jobId: string, runId: string, eventType: string, message: string): Promise<void> {
+  await db.batch([
+    db.prepare(`UPDATE WORK_QUEUE SET updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(jobId),
+    db.prepare(`INSERT INTO RUN_EVENTS(run_id,event_type,message) VALUES (?,?,?)`).bind(runId,eventType,message)
+  ]);
+}
+
 export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
   async run(event: WorkflowEvent<FactoryJobParams>, step: WorkflowStep) {
     const jobId = event.payload.jobId;
@@ -148,18 +155,20 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
       const maxRevisionAttempts = Math.max(0,Math.min(2,Number(payload.maxRevisionAttempts ?? 2)));
 
       let attempt = 1;
+      await step.do("producer heartbeat 1", async () => touchJob(this.env.DB,jobId,runId,"producer_started","Producer attempt 1 started"));
       let producer = await step.do(
         "producer attempt 1",
-        { retries:{ limit:3,delay:"10 seconds",backoff:"exponential" } },
+        { retries:{ limit:1,delay:"8 seconds",backoff:"exponential" } },
         async () => runNvidiaText(this.env,{
           system:routed.systemPrompt,
           prompt:`OBJECTIVE:\n${objective}\n\nACCEPTANCE CRITERIA:\n${acceptanceCriteria.map((x,i)=>`${i+1}. ${x}`).join("\n") || "1. Materially satisfy the objective."}\n\nCONTEXT:\n${JSON.stringify(payload.context ?? {},null,2)}\n\nProduce the artifact now.`,
-          maxTokens:1800,
+          maxTokens:1400,
           temperature:0.15,
           purpose:routed.purpose
         })
       );
 
+      await step.do("producer completed heartbeat 1", async () => touchJob(this.env.DB,jobId,runId,"producer_completed","Producer attempt 1 completed"));
       await step.do("persist producer artifact 1", async () => {
         await this.env.DB.prepare(
           `INSERT INTO ARTIFACTS(id,job_id,kind,name,metadata_json) VALUES (?,?,'agent-output',?,?)`
@@ -169,26 +178,29 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
         ).run();
       });
 
+      await step.do("qa heartbeat 1", async () => touchJob(this.env.DB,jobId,runId,"qa_started","Independent QA attempt 1 started"));
       let review = await step.do("independent qa 1", async () => reviewOutput(this.env,{
         objective,acceptanceCriteria,producerRole:routed.role,producerModel:producer.model,output:producer.content,attempt
       }));
-      await recordQuality(this.env.DB,{ jobId,runId,producerModel:producer.model,attemptNo:attempt,review });
+      await step.do("record quality 1", async () => recordQuality(this.env.DB,{ jobId,runId,producerModel:producer.model,attemptNo:attempt,review }));
 
       while (review.decision === "RETRY" && attempt <= maxRevisionAttempts) {
         attempt++;
         const previous = producer.content;
         const instructions = review.revisionInstructions || review.reasons.join("; ");
 
+        await step.do(`producer heartbeat ${attempt}`, async () => touchJob(this.env.DB,jobId,runId,"producer_revision_started",`Producer revision ${attempt} started`));
         producer = await step.do(
           `producer revision ${attempt}`,
-          { retries:{ limit:2,delay:"10 seconds",backoff:"exponential" } },
+          { retries:{ limit:1,delay:"8 seconds",backoff:"exponential" } },
           async () => runNvidiaText(this.env,{
             system:routed.systemPrompt,
             prompt:`Revise the artifact.\n\nOBJECTIVE:\n${objective}\n\nACCEPTANCE CRITERIA:\n${acceptanceCriteria.map((x,i)=>`${i+1}. ${x}`).join("\n")}\n\nQA REVISION INSTRUCTIONS:\n${instructions}\n\nPREVIOUS ARTIFACT:\n${previous}\n\nReturn the full corrected artifact, not a commentary about changes.`,
-            maxTokens:1900,temperature:0.1,purpose:routed.purpose
+            maxTokens:1500,temperature:0.1,purpose:routed.purpose
           })
         );
 
+        await step.do(`producer completed heartbeat ${attempt}`, async () => touchJob(this.env.DB,jobId,runId,"producer_revision_completed",`Producer revision ${attempt} completed`));
         await step.do(`persist producer artifact ${attempt}`, async () => {
           await this.env.DB.prepare(
             `INSERT INTO ARTIFACTS(id,job_id,kind,name,metadata_json) VALUES (?,?,'agent-output',?,?)`
@@ -198,10 +210,11 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
           ).run();
         });
 
+        await step.do(`qa heartbeat ${attempt}`, async () => touchJob(this.env.DB,jobId,runId,"qa_revision_started",`Independent QA attempt ${attempt} started`));
         review = await step.do(`independent qa ${attempt}`, async () => reviewOutput(this.env,{
           objective,acceptanceCriteria,producerRole:routed.role,producerModel:producer.model,output:producer.content,attempt
         }));
-        await recordQuality(this.env.DB,{ jobId,runId,producerModel:producer.model,attemptNo:attempt,review });
+        await step.do(`record quality ${attempt}`, async () => recordQuality(this.env.DB,{ jobId,runId,producerModel:producer.model,attemptNo:attempt,review }));
       }
 
       if (review.decision === "RETRY") {
@@ -264,12 +277,23 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
       return { jobId,runId,result };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      const failedPayload = safeJson(job.payload_json) as AutonomousPayload & Record<string, unknown>;
+      const failedRoadmapId = typeof failedPayload.roadmapId === "string" ? failedPayload.roadmapId : null;
+
       await step.do("mark job failed", async () => {
-        await this.env.DB.batch([
+        const statements = [
           this.env.DB.prepare(`UPDATE WORK_QUEUE SET status='failed',error_text=?,completed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(message.slice(0,4000),jobId),
           this.env.DB.prepare(`UPDATE RUNS SET status='failed',error_text=?,completed_at=CURRENT_TIMESTAMP WHERE id=?`).bind(message.slice(0,4000),runId),
-          this.env.DB.prepare(`INSERT INTO RUN_EVENTS(run_id,event_type,message) VALUES (?,'workflow_failed',?)`).bind(runId,message.slice(0,4000))
-        ]);
+          this.env.DB.prepare(`INSERT INTO RUN_EVENTS(run_id,event_type,message) VALUES (?,'workflow_failed',?)`).bind(runId,message.slice(0,4000)),
+          this.env.DB.prepare(`INSERT INTO JOB_DECISIONS(job_id,decision_type,actor_role,data_json) VALUES (?,'EXECUTION_FAILED','Governor',?)`).bind(jobId,JSON.stringify({ error:message.slice(0,2000) }))
+        ];
+        if (failedRoadmapId) {
+          statements.push(
+            this.env.DB.prepare(`UPDATE FACTORY_ROADMAP SET status='blocked',result_summary=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND work_queue_id=?`).bind(`Execution failure: ${message.slice(0,900)}`,failedRoadmapId,jobId),
+            this.env.DB.prepare(`INSERT INTO BLOCKERS(id,scope,severity,status,summary,details) VALUES (?,'factory','high','open',?,?)`).bind(crypto.randomUUID(),String(failedPayload.roadmapTitle ?? "Autonomous execution failure"),message.slice(0,3000))
+          );
+        }
+        await this.env.DB.batch(statements);
       });
       await notifyBestEffort(this.env,`❌ Zihin Factory işi başarısız\nJob: ${jobId}\n${message.slice(0,2000)}`);
       await wakeGovernor(this.env,"job-failed");

@@ -1,6 +1,7 @@
 export type GovernorEnv = {
   DB: D1Database;
   JOB_QUEUE: Queue;
+  FACTORY_WORKFLOW?: Workflow;
 };
 
 export type GovernorCycleResult = {
@@ -220,6 +221,10 @@ export async function governorCycle(env: GovernorEnv): Promise<GovernorCycleResu
   }
 
   try {
+    if (env.FACTORY_WORKFLOW) {
+      await recoverStaleJobs(env as GovernorEnv & { FACTORY_WORKFLOW: Workflow },4);
+    }
+
     const activeRow = await env.DB.prepare(
       `SELECT COUNT(*) AS count FROM WORK_QUEUE WHERE status IN ('running','verify')`
     ).first<{ count: number }>();
@@ -259,4 +264,82 @@ export async function governorCycle(env: GovernorEnv): Promise<GovernorCycleResu
 
 export async function setContinuous(db: D1Database, enabled: boolean): Promise<void> {
   await setState(db, "continuous_enabled", enabled ? "1" : "0");
+}
+
+export type StaleRecoveryResult = {
+  scanned: number;
+  recovered: number;
+  terminated: number;
+  errors: string[];
+};
+
+export async function recoverStaleJobs(
+  env: GovernorEnv & { FACTORY_WORKFLOW: Workflow },
+  staleMinutes = 4
+): Promise<StaleRecoveryResult> {
+  const rows = await env.DB.prepare(
+    `SELECT id,workflow_instance_id,updated_at
+     FROM WORK_QUEUE
+     WHERE status='running'
+       AND datetime(updated_at) <= datetime('now', ?)
+     ORDER BY updated_at ASC
+     LIMIT 10`
+  ).bind(`-${Math.max(2, Math.min(30, staleMinutes))} minutes`).all<{
+    id: string;
+    workflow_instance_id: string | null;
+    updated_at: string;
+  }>();
+
+  let recovered = 0;
+  let terminated = 0;
+  const errors: string[] = [];
+
+  for (const row of rows.results) {
+    if (row.workflow_instance_id) {
+      try {
+        const instance = await env.FACTORY_WORKFLOW.get(row.workflow_instance_id);
+        const details = await instance.status();
+        if (["queued","running","waiting","paused","waitingForPause"].includes(details.status)) {
+          await instance.terminate();
+          terminated++;
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        // Missing/already-terminal instances must not prevent D1 recovery.
+        errors.push(`${row.id}:${message.slice(0, 400)}`);
+      }
+    }
+
+    await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE WORK_QUEUE
+         SET status='abandoned',error_text='stale_workflow_recovered',completed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP
+         WHERE id=? AND status='running'`
+      ).bind(row.id),
+      env.DB.prepare(
+        `UPDATE RUNS
+         SET status='abandoned',error_text='stale_workflow_recovered',completed_at=CURRENT_TIMESTAMP
+         WHERE job_id=? AND status='running'`
+      ).bind(row.id),
+      env.DB.prepare(
+        `UPDATE FACTORY_ROADMAP
+         SET status='ready',work_queue_id=NULL,result_summary='Recovered after stale workflow timeout',updated_at=CURRENT_TIMESTAMP
+         WHERE work_queue_id=? AND status='dispatched'`
+      ).bind(row.id),
+      env.DB.prepare(
+        `INSERT INTO JOB_DECISIONS(job_id,decision_type,actor_role,data_json)
+         VALUES (?,'STALE_RECOVER','Governor',?)`
+      ).bind(row.id,JSON.stringify({ previousUpdatedAt: row.updated_at, workflowInstanceId: row.workflow_instance_id }))
+    ]);
+    recovered++;
+  }
+
+  if (recovered > 0) {
+    await env.DB.prepare(
+      `INSERT INTO METRICS(metric_name,metric_value,metric_text,scope)
+       VALUES ('stale_jobs_recovered',?,?,'factory')`
+    ).bind(recovered,JSON.stringify({ terminated, errors: errors.slice(0, 5) })).run();
+  }
+
+  return { scanned: rows.results.length, recovered, terminated, errors };
 }

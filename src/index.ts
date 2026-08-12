@@ -1,5 +1,5 @@
 import { ensureSchema } from "./schema";
-import { governorCycle, seedRoadmap, setContinuous } from "./governor";
+import { governorCycle, seedRoadmap, setContinuous, recoverStaleJobs } from "./governor";
 export { FactoryWorkflow } from "./workflow";
 
 type Env = {
@@ -36,7 +36,7 @@ function authorized(request: Request, env: Env): boolean {
 async function markPhase(db: D1Database): Promise<void> {
   await db.prepare(
     `INSERT INTO PROJECT_STATE(key,value,updated_at)
-     VALUES ('factory_phase','autonomous-governor',CURRENT_TIMESTAMP)
+     VALUES ('factory_phase','autonomous-resilient',CURRENT_TIMESTAMP)
      ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP`
   ).run();
 }
@@ -110,13 +110,24 @@ async function factorySnapshot(db: D1Database) {
     `SELECT id,severity,status,summary,details,created_at,updated_at
      FROM BLOCKERS WHERE status='open' ORDER BY created_at DESC LIMIT 20`
   ).all();
+  const activeJobs = await db.prepare(
+    `SELECT id,job_type,status,workflow_instance_id,started_at,updated_at,error_text
+     FROM WORK_QUEUE WHERE status IN ('running','verify') ORDER BY updated_at ASC LIMIT 10`
+  ).all();
+  const recentEvents = await db.prepare(
+    `SELECT re.run_id,re.event_type,re.message,re.created_at,r.job_id
+     FROM RUN_EVENTS re LEFT JOIN RUNS r ON r.id=re.run_id
+     ORDER BY re.created_at DESC LIMIT 30`
+  ).all();
 
   return {
     state: state.results,
     queue: queue.results,
     roadmap: roadmap.results,
     recentReviews: recentReviews.results,
-    blockers: blockers.results
+    blockers: blockers.results,
+    activeJobs: activeJobs.results,
+    recentEvents: recentEvents.results
   };
 }
 
@@ -131,7 +142,7 @@ export default {
       return json({
         ok: true,
         service: "zihin-factory-governor",
-        phase: "autonomous-governor",
+        phase: "autonomous-resilient",
         time: new Date().toISOString(),
         meta: meta.results
       });
@@ -148,7 +159,7 @@ export default {
 
     if (request.method === "GET" && url.pathname === "/factory") {
       const snapshot = await factorySnapshot(env.DB);
-      return json({ ok:true,phase:"autonomous-governor",...snapshot });
+      return json({ ok:true,phase:"autonomous-resilient",...snapshot });
     }
 
     if (request.method === "GET" && url.pathname === "/jobs") {
@@ -182,6 +193,12 @@ export default {
       return json({ ok:true,continuous:false });
     }
 
+    if (request.method === "POST" && url.pathname === "/admin/recover-stale") {
+      const recovery = await recoverStaleJobs(env,2);
+      const cycle = await governorCycle(env);
+      return json({ ok:true,recovery,cycle });
+    }
+
     if (request.method === "POST" && url.pathname === "/admin/cycle") {
       const cycle = await governorCycle(env);
       return json({ ok:true,cycle });
@@ -207,7 +224,7 @@ export default {
     return json({
       ok:true,
       service:"zihin-factory-governor",
-      phase:"autonomous-governor",
+      phase:"autonomous-resilient",
       routes:[
         "GET /health (public)",
         "GET /factory (Bearer token)",
@@ -218,6 +235,7 @@ export default {
         "POST /admin/seed-roadmap (Bearer token)",
         "POST /admin/start (Bearer token)",
         "POST /admin/pause (Bearer token)",
+        "POST /admin/recover-stale (Bearer token)",
         "POST /admin/cycle (Bearer token)"
       ]
     });
