@@ -36,7 +36,7 @@ function authorized(request: Request, env: Env): boolean {
 async function markPhase(db: D1Database): Promise<void> {
   await db.prepare(
     `INSERT INTO PROJECT_STATE(key,value,updated_at)
-     VALUES ('factory_phase','autonomous-provider-resilient',CURRENT_TIMESTAMP)
+     VALUES ('factory_phase','autonomous-qa-resilient',CURRENT_TIMESTAMP)
      ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP`
   ).run();
 }
@@ -142,7 +142,7 @@ export default {
       return json({
         ok: true,
         service: "zihin-factory-governor",
-        phase: "autonomous-provider-resilient",
+        phase: "autonomous-qa-resilient",
         time: new Date().toISOString(),
         meta: meta.results
       });
@@ -159,7 +159,7 @@ export default {
 
     if (request.method === "GET" && url.pathname === "/factory") {
       const snapshot = await factorySnapshot(env.DB);
-      return json({ ok:true,phase:"autonomous-provider-resilient",...snapshot });
+      return json({ ok:true,phase:"autonomous-qa-resilient",...snapshot });
     }
 
     if (request.method === "GET" && url.pathname === "/jobs") {
@@ -224,7 +224,7 @@ export default {
     return json({
       ok:true,
       service:"zihin-factory-governor",
-      phase:"autonomous-provider-resilient",
+      phase:"autonomous-qa-resilient",
       routes:[
         "GET /health (public)",
         "GET /factory (Bearer token)",

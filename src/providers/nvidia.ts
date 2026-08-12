@@ -12,9 +12,10 @@ type NvidiaEnv = {
 };
 
 const API_BASE = "https://integrate.api.nvidia.com/v1";
-const INITIAL_RESPONSE_TIMEOUT_MS = 35_000;
-const STREAM_IDLE_TIMEOUT_MS = 30_000;
-const STREAM_TOTAL_TIMEOUT_MS = 105_000;
+const INITIAL_RESPONSE_TIMEOUT_MS = 25_000;
+const STREAM_IDLE_TIMEOUT_MS = 25_000;
+const STREAM_TOTAL_TIMEOUT_MS = 75_000;
+const HEARTBEAT_INTERVAL_MS = 12_000;
 const MAX_PROVIDER_ATTEMPTS = 3;
 
 // Latency-first order: the public hosted NIM endpoint can return 524 when a
@@ -47,7 +48,7 @@ const CODER_MODELS = [
 let cachedModels: { ids: string[]; expiresAt: number } | null = null;
 
 function isTextModel(id: string): boolean {
-  return /(instruct|reasoning)$/i.test(id) &&
+  return /(instruct|reasoning)(?:[-_.][a-z0-9.]+)*$/i.test(id) &&
     !/(embed|embedding|rerank|guard|vision|image|audio|speech)/i.test(id);
 }
 
@@ -132,9 +133,19 @@ function readWithTimeout(reader: any, controller: AbortController, timeoutMs: nu
 async function streamingCompletion(
   env: NvidiaEnv,
   model: string,
-  body: Record<string, unknown>
+  body: Record<string, unknown>,
+  onHeartbeat?: () => Promise<void> | void
 ): Promise<NvidiaResult> {
   const controller = new AbortController();
+  let lastHeartbeatAt = 0;
+  const heartbeat = async (force = false) => {
+    if (!onHeartbeat) return;
+    const now = Date.now();
+    if (!force && now - lastHeartbeatAt < HEARTBEAT_INTERVAL_MS) return;
+    lastHeartbeatAt = now;
+    try { await onHeartbeat(); } catch { /* heartbeat must not fail provider work */ }
+  };
+  await heartbeat(true);
   const initialTimer = setTimeout(() => controller.abort("nvidia_initial_response_timeout"), INITIAL_RESPONSE_TIMEOUT_MS);
   let response: Response;
   try {
@@ -151,6 +162,8 @@ async function streamingCompletion(
   } finally {
     clearTimeout(initialTimer);
   }
+
+  await heartbeat(true);
 
   if (!response.ok) {
     const text = await response.text();
@@ -178,6 +191,7 @@ async function streamingCompletion(
     }
 
     const chunk = await readWithTimeout(reader, controller, STREAM_IDLE_TIMEOUT_MS);
+    await heartbeat();
     if (chunk.done) break;
     buffer += decoder.decode(chunk.value, { stream: true });
 
@@ -222,8 +236,10 @@ export async function runNvidiaText(
     temperature?: number;
     purpose?: NvidiaPurpose;
     avoidModels?: string[];
+    onHeartbeat?: () => Promise<void> | void;
   }
 ): Promise<NvidiaResult> {
+  try { await input.onHeartbeat?.(); } catch { /* heartbeat is best effort */ }
   const ids = await listModels(env);
   const candidates = candidateOrder(ids, input.purpose ?? "producer", input.avoidModels ?? []);
 
@@ -241,14 +257,16 @@ export async function runNvidiaText(
   for (let i = 0; i < maxAttempts; i++) {
     const model = candidates[i];
     try {
+      try { await input.onHeartbeat?.(); } catch { /* heartbeat is best effort */ }
       return await streamingCompletion(env, model, {
         messages,
         max_tokens: Math.max(64, Math.min(1200, input.maxTokens ?? 900)),
         temperature: input.temperature ?? 0.2
-      });
+      }, input.onHeartbeat);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       failures.push(`${model}:${message.slice(0, 700)}`);
+      try { await input.onHeartbeat?.(); } catch { /* heartbeat is best effort */ }
     }
   }
 

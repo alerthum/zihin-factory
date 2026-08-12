@@ -304,7 +304,7 @@ export async function governorCycle(env: GovernorEnv): Promise<GovernorCycleResu
 
   try {
     if (env.FACTORY_WORKFLOW) {
-      await recoverStaleJobs(env as GovernorEnv & { FACTORY_WORKFLOW: Workflow },4);
+      await recoverStaleJobs(env as GovernorEnv & { FACTORY_WORKFLOW: Workflow },5);
     }
 
     const reconciled = await reconcileDispatchedRoadmap(env.DB);

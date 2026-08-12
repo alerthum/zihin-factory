@@ -62,6 +62,7 @@ export async function reviewOutput(
     producerModel: string;
     output: string;
     attempt: number;
+    onHeartbeat?: () => Promise<void> | void;
   }
 ): Promise<QualityReview> {
   const deterministicIssues = deterministicChecks(input.output);
@@ -93,6 +94,9 @@ Return ONLY valid JSON with this exact shape:
   "revisionInstructions": "specific revision instructions or empty string"
 }
 
+Score rule:
+- score MUST be an integer from 0 to 100. Do not use a 0-1 fraction.
+
 Decision rules:
 - PASS: all acceptance criteria are substantively met and no serious deterministic issue remains.
 - RETRY: fixable quality problem; a revision can plausibly pass.
@@ -106,7 +110,8 @@ Decision rules:
     maxTokens: 450,
     temperature: 0.05,
     purpose: "reviewer",
-    avoidModels: [input.producerModel]
+    avoidModels: [input.producerModel],
+    onHeartbeat: input.onHeartbeat
   });
 
   const parsed = parseJsonObject(response.content);
@@ -127,7 +132,11 @@ Decision rules:
     : [String(parsed.reasons ?? "No reasons supplied")];
 
   let decision = normalizeDecision(parsed.decision);
-  const score = Number.isFinite(scoreRaw) ? Math.max(0, Math.min(100, scoreRaw)) : 0;
+  let normalizedScore = Number.isFinite(scoreRaw) ? scoreRaw : 0;
+  // Some models still emit confidence-style 0..1 despite the contract.
+  // Normalize that representation rather than treating 0.8 as 0.8/100.
+  if (normalizedScore > 0 && normalizedScore <= 1) normalizedScore *= 100;
+  const score = Math.max(0, Math.min(100, normalizedScore));
 
   if (deterministicIssues.length > 0 && decision === "PASS") decision = "RETRY";
   if (score < 70 && decision === "PASS") decision = "RETRY";
