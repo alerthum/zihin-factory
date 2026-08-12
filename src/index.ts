@@ -44,7 +44,7 @@ async function markPhase(db: D1Database): Promise<void> {
   if (phaseMarked) return;
   await db.prepare(
     `INSERT INTO PROJECT_STATE(key,value,updated_at)
-     VALUES ('factory_phase','multi-lane-operator-dashboard',CURRENT_TIMESTAMP)
+     VALUES ('factory_phase','project-director-production-engine',CURRENT_TIMESTAMP)
      ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP`
   ).run();
   phaseMarked = true;
@@ -170,9 +170,22 @@ async function factorySnapshot(db: D1Database) {
   const state = await db.prepare(`SELECT key,value,updated_at FROM PROJECT_STATE ORDER BY key`).all<{key:string;value:string;updated_at:string}>();
   const queue = await db.prepare(`SELECT status,COUNT(*) AS count FROM WORK_QUEUE GROUP BY status ORDER BY status`).all();
   const roadmap = await db.prepare(
-    `SELECT id,sequence_no,title,job_type,agent_role,objective,status,work_queue_id,result_summary,updated_at
+    `SELECT id,sequence_no,title,job_type,agent_role,objective,status,work_queue_id,result_summary,depends_on_json,updated_at
      FROM FACTORY_ROADMAP ORDER BY sequence_no`
-  ).all();
+  ).all<Record<string,unknown>>();
+
+  const roadmapStatus = new Map<string,string>();
+  for (const row of roadmap.results) roadmapStatus.set(String(row.id),String(row.status));
+  const roadmapView = roadmap.results.map(row => {
+    let deps: string[] = [];
+    try { const parsed = JSON.parse(String(row.depends_on_json ?? "[]")); if (Array.isArray(parsed)) deps = parsed.map(String); } catch { deps = []; }
+    const blockedBy = deps.filter(id => roadmapStatus.get(id) !== "done").map(id => ({ id, status:roadmapStatus.get(id) ?? "missing" }));
+    const eligible = String(row.status) === "ready" && blockedBy.length === 0;
+    const lane = laneForRole(String(row.agent_role ?? ""));
+    return { ...row, depends_on_json:undefined, dependencies:deps, blockedBy, eligible, lane, lane_label:laneLabel(lane) };
+  });
+  const eligibleRoadmap = roadmapView.filter(x => x.eligible);
+  const blockedReadyRoadmap = roadmapView.filter((x:any) => String(x.status) === "ready" && !x.eligible);
   const recentReviews = await db.prepare(
     `SELECT q.job_id,q.reviewer_model,q.attempt_no,q.decision,q.score,q.created_at,r.title AS roadmap_title
      FROM QUALITY_REVIEWS q LEFT JOIN FACTORY_ROADMAP r ON r.work_queue_id=q.job_id
@@ -206,6 +219,20 @@ async function factorySnapshot(db: D1Database) {
     const lane = laneForRole(role);
     return { ...row, payload_json:undefined, agent_role:role || null, roadmap_title:row.roadmap_title ?? payload.roadmapTitle ?? null, lane, lane_label:laneLabel(lane) };
   });
+  const startingRaw = await db.prepare(
+    `SELECT w.id,w.job_type,w.status,w.payload_json,w.workflow_instance_id,w.updated_at,
+            r.title AS roadmap_title,r.agent_role
+     FROM WORK_QUEUE w LEFT JOIN FACTORY_ROADMAP r ON r.work_queue_id=w.id
+     WHERE w.status='queued' ORDER BY w.updated_at ASC LIMIT 10`
+  ).all<Record<string,unknown>>();
+  const startingJobs = startingRaw.results.map(row => {
+    let payload: Record<string,unknown> = {};
+    try { payload = JSON.parse(String(row.payload_json ?? "{}")); } catch { payload = {}; }
+    const role = String(row.agent_role ?? payload.agentRole ?? "");
+    const lane = laneForRole(role);
+    return { ...row,payload_json:undefined,agent_role:role || null,roadmap_title:row.roadmap_title ?? payload.roadmapTitle ?? null,lane,lane_label:laneLabel(lane) };
+  });
+
   const recentEvents = await db.prepare(
     `SELECT re.run_id,re.event_type,re.message,re.created_at,r.job_id,fr.title AS roadmap_title
      FROM RUN_EVENTS re
@@ -242,6 +269,21 @@ async function factorySnapshot(db: D1Database) {
        COUNT(*) AS total
      FROM PROJECT_IMPACT WHERE date(created_at)=date('now')`
   ).first<{completed:number|null;merged:number|null;waiting_human:number|null;total:number|null}>();
+  const last6h = await db.prepare(`SELECT
+      COUNT(*) AS jobs,
+      SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) AS completed,
+      SUM(CASE WHEN status='quarantine' THEN 1 ELSE 0 END) AS quarantine,
+      SUM(CASE WHEN status='blocked' THEN 1 ELSE 0 END) AS blocked,
+      SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed,
+      SUM(CASE WHEN status IN ('running','verify') THEN 1 ELSE 0 END) AS active
+    FROM WORK_QUEUE WHERE datetime(created_at) >= datetime('now','-6 hours')`).first<{jobs:number|null;completed:number|null;quarantine:number|null;blocked:number|null;failed:number|null;active:number|null}>();
+  const last6hPr = await db.prepare(`SELECT
+      SUM(CASE WHEN status='waiting-human' THEN 1 ELSE 0 END) AS waiting,
+      SUM(CASE WHEN status='merged' THEN 1 ELSE 0 END) AS merged,
+      COUNT(*) AS total
+    FROM PROJECT_IMPACT WHERE datetime(created_at) >= datetime('now','-6 hours') AND pr_number IS NOT NULL`).first<{waiting:number|null;merged:number|null;total:number|null}>();
+  const directorFeeds = await db.prepare(`SELECT action,COUNT(*) AS count FROM PROJECT_FEED_LOG
+    WHERE datetime(created_at) >= datetime('now','-6 hours') AND action IN ('DIRECTOR_SEED','PROMOTE_RECON_TO_CODE') GROUP BY action`).all<{action:string;count:number}>();
   const meta = await db.prepare(`SELECT key,value FROM FACTORY_META ORDER BY key`).all<{key:string;value:string}>();
   const stateMap = Object.fromEntries(state.results.map(x=>[x.key,x.value]));
   const metaMap = Object.fromEntries(meta.results.map(x=>[x.key,x.value]));
@@ -250,16 +292,19 @@ async function factorySnapshot(db: D1Database) {
     lane,
     label:laneLabel(lane),
     active:activeJobs.filter(x=>x.lane===lane).length,
+    starting:startingJobs.filter(x=>x.lane===lane).length,
+    eligible:eligibleRoadmap.filter(x=>x.lane===lane).length,
     capacity:1
   }));
 
   return {
-    version:metaMap.factory_version ?? "0.6.0",
+    version:metaMap.factory_version ?? "0.7.0",
     state:state.results,stateMap,
-    queue:queue.results,roadmap:roadmap.results,recentReviews:recentReviews.results,blockers:blockers.results,
-    activeJobs,recentEvents:recentEvents.results,repos:repos.results,githubOperations:githubOperations.results,
+    queue:queue.results,roadmap:roadmapView,eligibleRoadmap,blockedReadyRoadmap,recentReviews:recentReviews.results,blockers:blockers.results,
+    activeJobs,startingJobs,recentEvents:recentEvents.results,repos:repos.results,githubOperations:githubOperations.results,
     impact:impact.results,todayImpact:todayImpact.results,feedLog:feedLog.results,agents:agents.results,
     operatorIssues,laneSummary,parallelLimit:FACTORY_MAX_PARALLEL,
+    last6h:{jobs:Number(last6h?.jobs??0),completed:Number(last6h?.completed??0),quarantine:Number(last6h?.quarantine??0),blocked:Number(last6h?.blocked??0),failed:Number(last6h?.failed??0),active:Number(last6h?.active??0),prs:Number(last6hPr?.total??0),prsWaiting:Number(last6hPr?.waiting??0),prsMerged:Number(last6hPr?.merged??0),directorFeeds:Object.fromEntries(directorFeeds.results.map(x=>[x.action,Number(x.count??0)]))},
     today:{completed:Number(todayRow?.completed??0),merged:Number(todayRow?.merged??0),waitingHuman:Number(todayRow?.waiting_human??0),total:Number(todayRow?.total??0)}
   };
 }
@@ -275,7 +320,7 @@ export default {
       return json({
         ok: true,
         service: "zihin-factory-governor",
-        phase: "multi-lane-operator-dashboard",
+        phase: "project-director-production-engine",
         time: new Date().toISOString(),
         meta: meta.results
       });
@@ -295,12 +340,12 @@ export default {
 
     if (request.method === "GET" && (url.pathname === "/status" || url.pathname === "/dashboard/api")) {
       const snapshot = await factorySnapshot(env.DB);
-      return json({ ok:true,phase:"multi-lane-operator-dashboard",...snapshot });
+      return json({ ok:true,phase:"project-director-production-engine",...snapshot });
     }
 
     if (request.method === "GET" && url.pathname === "/factory") {
       const snapshot = await factorySnapshot(env.DB);
-      return json({ ok:true,phase:"multi-lane-operator-dashboard",...snapshot });
+      return json({ ok:true,phase:"project-director-production-engine",...snapshot });
     }
 
     if (request.method === "GET" && url.pathname === "/github/status") {
@@ -433,7 +478,7 @@ export default {
     return json({
       ok:true,
       service:"zihin-factory-governor",
-      phase:"multi-lane-operator-dashboard",
+      phase:"project-director-production-engine",
       routes:[
         "GET /health (public)",
         "GET /dashboard (public shell; token entered in browser)",

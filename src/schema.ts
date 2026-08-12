@@ -16,6 +16,7 @@ export const SCHEMA_STATEMENTS = [
 `CREATE TABLE IF NOT EXISTS FACTORY_ROADMAP (id TEXT PRIMARY KEY,sequence_no INTEGER NOT NULL,title TEXT NOT NULL,job_type TEXT NOT NULL,agent_role TEXT NOT NULL,objective TEXT NOT NULL,acceptance_json TEXT NOT NULL DEFAULT '[]',depends_on_json TEXT NOT NULL DEFAULT '[]',payload_json TEXT NOT NULL DEFAULT '{}',status TEXT NOT NULL DEFAULT 'ready',work_queue_id TEXT,result_summary TEXT,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
 `CREATE INDEX IF NOT EXISTS IX_FACTORY_ROADMAP_STATUS_SEQUENCE ON FACTORY_ROADMAP(status,sequence_no)`,
 `CREATE INDEX IF NOT EXISTS IX_FACTORY_ROADMAP_WORK_QUEUE ON FACTORY_ROADMAP(work_queue_id,status)`,
+`CREATE INDEX IF NOT EXISTS IX_FACTORY_ROADMAP_ROLE_STATUS ON FACTORY_ROADMAP(agent_role,status,updated_at)`,
 `CREATE TABLE IF NOT EXISTS QUALITY_REVIEWS (id TEXT PRIMARY KEY,job_id TEXT NOT NULL,run_id TEXT NOT NULL,reviewer_role TEXT NOT NULL,producer_model TEXT,reviewer_model TEXT,attempt_no INTEGER NOT NULL,decision TEXT NOT NULL,score REAL NOT NULL,reasons_json TEXT NOT NULL DEFAULT '[]',revision_instructions TEXT,deterministic_issues_json TEXT NOT NULL DEFAULT '[]',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
 `CREATE INDEX IF NOT EXISTS IX_QUALITY_REVIEWS_JOB ON QUALITY_REVIEWS(job_id,created_at)`,
 `CREATE TABLE IF NOT EXISTS JOB_DECISIONS (id INTEGER PRIMARY KEY AUTOINCREMENT,job_id TEXT NOT NULL,decision_type TEXT NOT NULL,actor_role TEXT NOT NULL,data_json TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
@@ -39,7 +40,7 @@ export async function ensureSchema(db: D1Database): Promise<void> {
   if (Date.now() < schemaReadyUntil) return;
   for (const sql of SCHEMA_STATEMENTS) await db.prepare(sql).run();
 
-  for (const [key,value] of [["schema_version","7"],["factory_version","0.6.1"]]) {
+  for (const [key,value] of [["schema_version","9"],["factory_version","0.7.0"]]) {
     await db.prepare(
       `INSERT INTO FACTORY_META(key,value,updated_at) VALUES (?,?,CURRENT_TIMESTAMP)
        ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP`
@@ -51,12 +52,14 @@ export async function ensureSchema(db: D1Database): Promise<void> {
     ["g8_turkish_research","10/10"],
     ["g8_turkish_verified_integration","7/10"],
     ["g8_turkish_live","blocked"],
-    ["factory_phase","multi-lane-operator-dashboard"],
+    ["factory_phase","project-director-production-engine"],
     ["continuous_enabled","0"],
     ["project_feeder_enabled","1"],
     ["factory_parallel_limit","4"],
     ["project_completion_percent","82"],
-    ["project_completion_source","baseline-manual"]
+    ["project_completion_source","baseline-manual"],
+    ["project_director_enabled","1"],
+    ["project_director_mode","continuous-backlog"]
   ];
 
   for (const [key,value] of state) {

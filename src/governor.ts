@@ -247,7 +247,7 @@ async function recoverKnownFixedFailures(db: D1Database): Promise<number> {
   let count=0;
   for (const row of rows.results) {
     await db.batch([
-      db.prepare(`UPDATE FACTORY_ROADMAP SET status='ready',work_queue_id=NULL,result_summary='0.6.1 JSON onarım motoru ile otomatik yeniden sıraya alındı',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='blocked'`).bind(row.id),
+      db.prepare(`UPDATE FACTORY_ROADMAP SET status='ready',work_queue_id=NULL,result_summary='0.7.0 JSON onarım motoru ile otomatik yeniden sıraya alındı',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='blocked'`).bind(row.id),
       db.prepare(`UPDATE BLOCKERS SET status='resolved',updated_at=CURRENT_TIMESTAMP WHERE status='open' AND summary=?`).bind(row.title),
       db.prepare(`INSERT INTO METRICS(metric_name,metric_value,metric_text,scope) VALUES ('known_failure_auto_recovered',1,?,'factory')`).bind(JSON.stringify({roadmapId:row.id,previousJobId:row.work_queue_id,reason:'code_patch_json_parse_failed'}))
     ]);
@@ -256,7 +256,7 @@ async function recoverKnownFixedFailures(db: D1Database): Promise<number> {
   return count;
 }
 
-async function enqueueQueuedJobs(env: GovernorEnv, limit = 3): Promise<number> {
+async function enqueueQueuedJobs(env: GovernorEnv, limit = 4): Promise<number> {
   if (limit <= 0) return 0;
   const rows = await env.DB.prepare(
     `SELECT id FROM WORK_QUEUE

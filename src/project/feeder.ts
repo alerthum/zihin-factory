@@ -12,6 +12,7 @@ export type ProjectFeederResult = {
   closedUnmerged: number;
   waitingHuman: number;
   action: string;
+  promoted?: number;
 };
 
 type SeedItem = {
@@ -148,6 +149,229 @@ function dailyAuditItems(now = new Date()): SeedItem[] {
   ];
 }
 
+
+type DirectorStream = "research" | "content" | "qa" | "release" | "code";
+
+type DirectorProgram = {
+  key: string;
+  stream: DirectorStream;
+  role: string;
+  jobType: "product.repo-recon" | "product.code-patch";
+  title: string;
+  focus: string;
+  impactArea: string;
+  objective: string;
+  acceptance: string[];
+};
+
+// The director keeps a real executable backlog instead of creating one audit every 15 minutes.
+// Lane capacity remains one active job per lane, while ready work is kept behind it so the
+// Governor can immediately hand off the next useful task when a job finishes/quarantines.
+const DIRECTOR_TARGETS: Record<DirectorStream,number> = {
+  research: 2,
+  content: 2,
+  qa: 2,
+  release: 1,
+  code: 1
+};
+
+const DIRECTOR_STREAM_ROLES: Record<DirectorStream,string[]> = {
+  research:["Structure Miner","Research Scout","Source Auditor","Curriculum Mapper"],
+  content:["Factory Designer","Distractor Engineer","Tutor Designer","Game Planner"],
+  qa:["QA Supervisor","Child Reviewer","Fairness Reviewer","IP/Security Reviewer"],
+  release:["Release Manager"],
+  code:["Codex Engineer"]
+};
+
+const DIRECTOR_PROGRAMS: DirectorProgram[] = [
+  {
+    key:"g8tr-native-runtime",stream:"research",role:"Structure Miner",jobType:"product.repo-recon",
+    title:"8. sınıf Türkçe native runtime gerçek dosya açıkları",
+    focus:"8th grade Turkish native integration runtime item factory quiz adapter tests",
+    impactArea:"8. Sınıf Türkçe / Native Runtime",
+    objective:"Canlı main üzerinde 8. sınıf Türkçe native integration 7/10 -> 10/10 hedefindeki bir sonraki uygulanabilir açığı yalnız gerçek dosya ve test kanıtıyla bul. Önceki raporu tekrar etme. Bir sonraki küçük production değişikliği için mevcut dosya yollarını, exact contract/risk alanını ve doğrulama komutunu açıkça belirt.",
+    acceptance:["En az 4 gerçek repo yolu kullanılmalı.","Tekrarlanan genel tavsiye yerine uygulanabilir tek bir sonraki adım seçilmeli.","Native adapter/item-factory/test ilişkisi kanıtlanmalı.","Static soru bankası önerilmemeli."]
+  },
+  {
+    key:"g8tr-tests",stream:"research",role:"Source Auditor",jobType:"product.repo-recon",
+    title:"8. sınıf Türkçe regression mutation test açığı",
+    focus:"grade 8 Turkish regression mutation semantic repeat answer leak solver oracle tests",
+    impactArea:"8. Sınıf Türkçe / Test Kapıları",
+    objective:"Canlı main üzerinde 8. sınıf Türkçe native integration için en değerli eksik regression veya mutation-style failure mode'u gerçek test kaynaklarıyla belirle. Sonraki patch'in en fazla iki gerçek dosyada uygulanabilecek biçimini tarif et.",
+    acceptance:["Gerçek test dosyaları ve runner kanıtı kullanılmalı.","En az bir somut failure mode seçilmeli.","Doğrulama komutu belirtilmeli.","Öneri en fazla iki dosyalık patch'e indirgenmeli."]
+  },
+  {
+    key:"factory-contract",stream:"content",role:"Factory Designer",jobType:"product.repo-recon",
+    title:"Soru fabrikası canonical contract üretim borcu",
+    focus:"assessment ECD AIG item factory generator distractor hint solution game adapter contracts",
+    impactArea:"Soru Fabrikası / Contract",
+    objective:"Canlı repo üzerinde canonical item factory sözleşmesinde gerçekten uygulanmamış veya zayıf kalan tek yüksek etkili production borcunu seç. Generator, distractor, hint, solution ve game adapter katmanlarını gerçek dosyalarla eşleştir ve küçük uygulanabilir patch hedefi üret.",
+    acceptance:["Gerçek repo yolları kullanılmalı.","Tek bir yüksek etkili contract borcu önceliklendirilmeli.","Her öneri test/gate ile doğrulanabilir olmalı.","Game-specific ayrı bankaya dönülmemeli."]
+  },
+  {
+    key:"distractor-hint",stream:"content",role:"Distractor Engineer",jobType:"product.repo-recon",
+    title:"Çeldirici ipucu çözüm kalitesi production borcu",
+    focus:"distractor misconception hint ladder solution model option quality Turkish engines",
+    impactArea:"İçerik Motoru / Çeldirici ve İpucu",
+    objective:"Canlı main üzerinde seçenek/çeldirici, misconception, hint ladder veya solution model kalitesini düşüren gerçek bir contract/test boşluğunu bul ve en küçük production iyileştirmesini gerçek dosya hedefleriyle tarif et.",
+    acceptance:["Gerçek öğrenci yanılgısı/çeldirici sözleşmesiyle bağlantı kurulmalı.","En az 3 gerçek dosya/test yolu kullanılmalı.","Sonraki patch ölçülebilir kalite kapısı içermeli.","Rastgele seçenek üretimi önerilmemeli."]
+  },
+  {
+    key:"semantic-quality",stream:"qa",role:"QA Supervisor",jobType:"product.repo-recon",
+    title:"Semantic repeat answer leak bağımsız kalite açığı",
+    focus:"semantic repeat answer leak option quality ambiguity solver oracle quality gates",
+    impactArea:"Soru Motoru / Bağımsız Kalite",
+    objective:"Canlı main üzerinde semantic repeat, answer leak, ambiguity veya option-quality risklerinden en yüksek etkili olanı gerçek test/kod kanıtıyla bağımsız QA olarak seç. Riskin yakalanacağı deterministic gate veya mutation-style kontrolü uygulanabilir biçimde tarif et.",
+    acceptance:["En az 3 gerçek dosya/test yolu kullanılmalı.","Birincil failure mode açıkça seçilmeli.","Önerilen gate ölçülebilir olmalı.","Sahte psikometri üretilmemeli."]
+  },
+  {
+    key:"oracle-adapter",stream:"qa",role:"Child Reviewer",jobType:"product.repo-recon",
+    title:"Solver oracle ve oyun adapter bağımsız kalite açığı",
+    focus:"solver oracle canonical item game adapter validation mutation tests",
+    impactArea:"Soru Motoru / Solver-Oracle",
+    objective:"Canlı main üzerinde solver/oracle doğruluğu ile game adapter sunum ayrımındaki en değerli doğrulama açığını gerçek kaynaklarla bul. Bir sonraki küçük test veya code patch hedefini somutlaştır.",
+    acceptance:["Canonical item ile adapter ayrımı korunmalı.","Gerçek kaynak yolları kullanılmalı.","Yanlış cevap/oracle sapmasını yakalayan failure mode belirtilmeli.","Sonraki iş en fazla iki dosyaya indirgenmeli."]
+  },
+  {
+    key:"release-ci",stream:"release",role:"Release Manager",jobType:"product.repo-recon",
+    title:"PR CI fail-closed yayın kapısı kontrolü",
+    focus:"github workflows CI quality gates pull request tests release deployment",
+    impactArea:"Yayın / CI",
+    objective:"Canlı Zihin Arenası reposunda CI, regression ve quality-gate zincirinin mevcut durumu üzerinden bir sonraki fail-closed yayın iyileştirmesini seç. Açık PR/merge bilgisini uydurma; yalnız canlı repo ve factory state kanıtını kullan.",
+    acceptance:["Gerçek workflow/test yolları kullanılmalı.","CI başarısızken release önerilmemeli.","En az iki yayın riski değerlendirilmeli ve biri önceliklendirilmeli.","İnsan merge kapısı korunmalı."]
+  },
+  {
+    key:"safe-code",stream:"code",role:"Codex Engineer",jobType:"product.code-patch",
+    title:"Zihin Arenası en küçük güvenli production iyileştirmesi",
+    focus:"8th grade Turkish native integration item factory quality gate regression mutation tests",
+    impactArea:"Zihin Arenası / Production Patch",
+    objective:"Canlı main üzerindeki gerçek dosyalardan en fazla ikisinde, 8. sınıf Türkçe native integration veya soru motoru kalite kapısına doğrudan katkı veren küçük ve geri alınabilir bir production code/test iyileştirmesi hazırla. Repo dilini ve mevcut mimariyi koru. QA PASS olmadan yazma ve yalnız Draft PR oluştur.",
+    acceptance:["Yalnız gerçekten okunmuş mevcut dosyalar değiştirilmeli.","En fazla 2 dosya değişmeli.","Doğrulama/test komutu bulunmalı.","Main'e doğrudan push/merge yapılmamalı.","Static soru bankası oluşturulmamalı."]
+  }
+];
+
+async function dependencyStatus(db: D1Database, depsJson: string): Promise<boolean> {
+  let deps: string[] = [];
+  try { const parsed=JSON.parse(depsJson||"[]"); if (Array.isArray(parsed)) deps=parsed.map(String); } catch { deps=[]; }
+  for (const dep of deps) {
+    const found=await db.prepare(`SELECT status FROM FACTORY_ROADMAP WHERE id=?`).bind(dep).first<{status:string}>();
+    if (found?.status !== "done") return false;
+  }
+  return true;
+}
+
+async function executableBacklogForRoles(db: D1Database, roles: string[]): Promise<number> {
+  if (!roles.length) return 0;
+  const placeholders=roles.map(()=>"?").join(",");
+  const rows=await db.prepare(
+    `SELECT status,depends_on_json FROM FACTORY_ROADMAP
+     WHERE agent_role IN (${placeholders}) AND status IN ('ready','dispatched','waiting-human')
+     ORDER BY updated_at DESC LIMIT 120`
+  ).bind(...roles).all<{status:string;depends_on_json:string}>();
+  let count=0;
+  for (const row of rows.results) {
+    if (row.status === "dispatched" || row.status === "waiting-human") { count++; continue; }
+    if (await dependencyStatus(db,row.depends_on_json)) count++;
+  }
+  return count;
+}
+
+async function executableBacklogForStream(db: D1Database, stream: DirectorStream): Promise<number> {
+  return executableBacklogForRoles(db,DIRECTOR_STREAM_ROLES[stream]);
+}
+
+async function nextDirectorCursor(db: D1Database, stream: DirectorStream): Promise<number> {
+  const key=`director_cursor_${stream}`;
+  const current=Number((await stateValue(db,key)) ?? "0");
+  const next=Number.isFinite(current) ? current+1 : 1;
+  await setState(db,key,String(next));
+  return next;
+}
+
+async function seedDirectorBacklog(db: D1Database): Promise<number> {
+  const waitingHuman=await db.prepare(`SELECT COUNT(*) AS count FROM PROJECT_IMPACT WHERE status='waiting-human'`).first<{count:number}>();
+  let inserted=0;
+  const streams: DirectorStream[]=["research","content","qa","release","code"];
+  for (const stream of streams) {
+    const programs=DIRECTOR_PROGRAMS.filter(x=>x.stream===stream);
+    if (!programs.length) continue;
+    let target=DIRECTOR_TARGETS[stream];
+    if (stream === "code" && Number(waitingHuman?.count ?? 0) > 0) target=0;
+    let backlog=await executableBacklogForStream(db,stream);
+    while (backlog < target) {
+      const cursor=await nextDirectorCursor(db,stream);
+      const program=programs[(cursor-1)%programs.length];
+      const id=`ZA-DIRECTOR-${stream.toUpperCase()}-${String(cursor).padStart(6,"0")}`;
+      const sequence=50_000_000 + cursor*100 + streams.indexOf(stream);
+      const result=await db.prepare(
+        `INSERT OR IGNORE INTO FACTORY_ROADMAP
+         (id,sequence_no,title,job_type,agent_role,objective,acceptance_json,depends_on_json,payload_json,status)
+         VALUES (?,?,?,?,?,?,?,'[]',?,'ready')`
+      ).bind(
+        id,sequence,`${program.title} [Director ${cursor}]`,program.jobType,program.role,program.objective,
+        JSON.stringify(program.acceptance),
+        JSON.stringify({repoAlias:"product",focus:program.focus,impactArea:program.impactArea,maxFiles:2,directorStream:stream,directorProgram:program.key,directorCursor:cursor})
+      ).run();
+      if ((result.meta?.changes ?? 0) > 0) {
+        inserted++; backlog++;
+        await db.prepare(`INSERT INTO PROJECT_FEED_LOG(action,roadmap_id,detail_json) VALUES ('DIRECTOR_SEED',?,?)`)
+          .bind(id,JSON.stringify({stream,program:program.key,role:program.role,target})).run();
+      } else {
+        break;
+      }
+    }
+  }
+  await setState(db,"director_backlog_last_fill",new Date().toISOString());
+  return inserted;
+}
+
+async function promotePassedReconToCode(db: D1Database): Promise<number> {
+  const waitingHuman=await db.prepare(`SELECT COUNT(*) AS count FROM PROJECT_IMPACT WHERE status='waiting-human'`).first<{count:number}>();
+  if (Number(waitingHuman?.count ?? 0) > 0) return 0;
+  if ((await executableBacklogForStream(db,"code")) >= 1) return 0;
+
+  const rows=await db.prepare(
+    `SELECT r.id,r.title,r.result_summary,r.payload_json,w.result_json
+     FROM FACTORY_ROADMAP r JOIN WORK_QUEUE w ON w.id=r.work_queue_id
+     WHERE r.job_type='product.repo-recon' AND r.status='done'
+       AND NOT EXISTS (SELECT 1 FROM PROJECT_FEED_LOG l WHERE l.action='PROMOTE_RECON_TO_CODE' AND l.roadmap_id=r.id)
+     ORDER BY r.updated_at DESC LIMIT 12`
+  ).all<{id:string;title:string;result_summary:string|null;payload_json:string;result_json:string|null}>();
+  if (!rows.results.length) return 0;
+
+  const source=rows.results[0];
+  let output=source.result_summary ?? "";
+  try {
+    const parsed=JSON.parse(source.result_json ?? "{}") as {output?:unknown};
+    if (typeof parsed.output === "string" && parsed.output.trim()) output=parsed.output;
+  } catch { /* summary fallback */ }
+  let payload: Record<string,unknown>={};
+  try { payload=JSON.parse(source.payload_json||"{}"); } catch { payload={}; }
+  const cursor=await nextDirectorCursor(db,"code");
+  const id=`ZA-DIRECTOR-CODE-FROM-RECON-${String(cursor).padStart(6,"0")}`;
+  const evidence=output.slice(0,5000);
+  const objective=`Bağımsız QA'dan PASS almış repo keşfini gerçek production değişikliğine çevir. Kaynak keşif: ${source.title}. Aşağıdaki kanıtı yalnız başlangıç ipucu olarak kullan; canlı main dosyalarını yeniden oku ve en fazla iki mevcut dosyada küçük, geri alınabilir code/test patch hazırla. QA PASS olmadan GitHub'a yazma.\n\nPASS RECON EVIDENCE:\n${evidence}`;
+  const acceptance=[
+    "Canlı main yeniden okunmalı; keşif çıktısı tek başına gerçek kabul edilmemeli.",
+    "Yalnız gerçekten mevcut ve okunmuş en fazla 2 dosya değiştirilmeli.",
+    "Patch, kaynak keşifteki doğrulanmış riske doğrudan katkı sağlamalı.",
+    "Test/doğrulama komutu belirtilmeli.",
+    "Main'e doğrudan push/merge yapılmamalı; yalnız QA PASS sonrası Draft PR oluşturulmalı."
+  ];
+  const result=await db.prepare(
+    `INSERT OR IGNORE INTO FACTORY_ROADMAP
+     (id,sequence_no,title,job_type,agent_role,objective,acceptance_json,depends_on_json,payload_json,status)
+     VALUES (?,? ,?,'product.code-patch','Codex Engineer',?,?,'[]',?,'ready')`
+  ).bind(
+    id,55_000_000+cursor,
+    `PASS repo keşfinden production patch: ${source.title}`.slice(0,240),objective,JSON.stringify(acceptance),
+    JSON.stringify({repoAlias:"product",focus:`${String(payload.focus??"")} ${evidence.slice(0,1400)}`,impactArea:String(payload.impactArea??"Zihin Arenası / Production Patch"),maxFiles:2,directorStream:"code",sourceReconRoadmapId:source.id})
+  ).run();
+  await db.prepare(`INSERT INTO PROJECT_FEED_LOG(action,roadmap_id,detail_json) VALUES ('PROMOTE_RECON_TO_CODE',?,?)`)
+    .bind(source.id,JSON.stringify({createdRoadmapId:id,changes:Number(result.meta?.changes??0)})).run();
+  return (result.meta?.changes ?? 0) > 0 ? 1 : 0;
+}
+
 export async function seedProjectRoadmap(db: D1Database): Promise<number> {
   let inserted = 0;
   const items = [...BASELINE,...dailyAuditItems()];
@@ -216,12 +440,15 @@ export async function projectFeederCycle(env: ProjectFeederEnv): Promise<Project
   const enabled = (await stateValue(env.DB,"project_feeder_enabled")) !== "0";
   if (!enabled) return {enabled:false,seeded:0,merged:0,closedUnmerged:0,waitingHuman:0,action:"paused"};
 
-  const seeded = await seedProjectRoadmap(env.DB);
+  const baselineSeeded = await seedProjectRoadmap(env.DB);
+  const promoted = await promotePassedReconToCode(env.DB);
+  const directorSeeded = await seedDirectorBacklog(env.DB);
+  const seeded = baselineSeeded + promoted + directorSeeded;
   const reconciled = String(env.GITHUB_TOKEN ?? "").trim()
     ? await reconcileProductPullRequests(env)
     : {merged:0,closedUnmerged:0,waitingHuman:0};
   const action = seeded > 0 ? "seeded" : reconciled.merged > 0 ? "pr-merged" : reconciled.closedUnmerged > 0 ? "pr-closed" : reconciled.waitingHuman > 0 ? "waiting-human" : "steady";
   await setState(env.DB,"last_project_feeder_action",action);
   await setState(env.DB,"last_project_feeder_at",new Date().toISOString());
-  return {enabled:true,seeded,...reconciled,action};
+  return {enabled:true,seeded,promoted,...reconciled,action};
 }

@@ -32,7 +32,7 @@ export function guidanceForError(raw: string | null | undefined, status = ""): O
       severity: "warning",
       title: "Kod değişikliği çıktısının formatı okunamadı",
       whatHappened: "Codex Engineer kod önerisini üretti ancak makinenin beklediği JSON sözleşmesine tam uymadı.",
-      factoryAction: "0.6.1 ve sonrası önce yerel JSON onarımı, ardından gerektiğinde ayrı JSON düzeltme ajanı kullanır. Eski bu tip bloklar Governor tarafından bir kez otomatik yeniden sıraya alınır.",
+      factoryAction: "0.7.0 ve sonrası önce yerel JSON onarımı, ardından gerektiğinde ayrı JSON düzeltme ajanı kullanır. Eski bu tip bloklar Governor tarafından bir kez otomatik yeniden sıraya alınır.",
       userAction: "Hiçbir şey yapmayın. Aynı hata yeni sürümde tekrar kalıcı BLOCKED olursa Dashboard size açıkça 'Güvenli yeniden dene' önerisi gösterecek.",
       autoHandled: true,
       allowManualRetry: false
