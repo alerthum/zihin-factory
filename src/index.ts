@@ -1,8 +1,9 @@
 import { ensureSchema } from "./schema";
-import { governorCycle, seedRoadmap, setContinuous, recoverStaleJobs } from "./governor";
+import { governorCycle, seedRoadmap, setContinuous, recoverStaleJobs, FACTORY_MAX_PARALLEL, laneForRole, laneLabel } from "./governor";
 import { getRepo } from "./providers/github";
 import { projectFeederCycle } from "./project/feeder";
 import { dashboardHtml } from "./dashboard/html";
+import { guidanceForError } from "./operations/guidance";
 export { FactoryWorkflow } from "./workflow";
 
 type Env = {
@@ -43,7 +44,7 @@ async function markPhase(db: D1Database): Promise<void> {
   if (phaseMarked) return;
   await db.prepare(
     `INSERT INTO PROJECT_STATE(key,value,updated_at)
-     VALUES ('factory_phase','production-loop-dashboard',CURRENT_TIMESTAMP)
+     VALUES ('factory_phase','multi-lane-operator-dashboard',CURRENT_TIMESTAMP)
      ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP`
   ).run();
   phaseMarked = true;
@@ -181,6 +182,16 @@ async function factorySnapshot(db: D1Database) {
     `SELECT id,severity,status,summary,details,created_at,updated_at FROM BLOCKERS
      WHERE status='open' ORDER BY created_at DESC LIMIT 30`
   ).all();
+  const recentFailures = await db.prepare(
+    `SELECT w.id AS job_id,w.job_type,w.status,w.error_text,w.updated_at,r.id AS roadmap_id,r.title AS roadmap_title,r.agent_role,r.result_summary
+     FROM WORK_QUEUE w LEFT JOIN FACTORY_ROADMAP r ON r.work_queue_id=w.id
+     WHERE w.status IN ('failed','blocked','quarantine','abandoned')
+     ORDER BY w.updated_at DESC LIMIT 20`
+  ).all<{job_id:string;job_type:string;status:string;error_text:string|null;updated_at:string;roadmap_id:string|null;roadmap_title:string|null;agent_role:string|null;result_summary:string|null}>();
+  const operatorIssues = recentFailures.results.map(row => ({
+    ...row,
+    guidance: guidanceForError(row.error_text ?? row.result_summary,row.status)
+  }));
   const activeRaw = await db.prepare(
     `SELECT w.id,w.job_type,w.status,w.payload_json,w.workflow_instance_id,w.started_at,w.updated_at,w.error_text,
             r.title AS roadmap_title,r.agent_role,
@@ -191,7 +202,9 @@ async function factorySnapshot(db: D1Database) {
   const activeJobs = activeRaw.results.map(row => {
     let payload: Record<string,unknown> = {};
     try { payload = JSON.parse(String(row.payload_json ?? "{}")); } catch { payload = {}; }
-    return { ...row, payload_json:undefined, agent_role:row.agent_role ?? payload.agentRole ?? null, roadmap_title:row.roadmap_title ?? payload.roadmapTitle ?? null };
+    const role = String(row.agent_role ?? payload.agentRole ?? "");
+    const lane = laneForRole(role);
+    return { ...row, payload_json:undefined, agent_role:role || null, roadmap_title:row.roadmap_title ?? payload.roadmapTitle ?? null, lane, lane_label:laneLabel(lane) };
   });
   const recentEvents = await db.prepare(
     `SELECT re.run_id,re.event_type,re.message,re.created_at,r.job_id,fr.title AS roadmap_title
@@ -232,6 +245,13 @@ async function factorySnapshot(db: D1Database) {
   const meta = await db.prepare(`SELECT key,value FROM FACTORY_META ORDER BY key`).all<{key:string;value:string}>();
   const stateMap = Object.fromEntries(state.results.map(x=>[x.key,x.value]));
   const metaMap = Object.fromEntries(meta.results.map(x=>[x.key,x.value]));
+  const laneKeys = ["research","content","code","qa","release"] as const;
+  const laneSummary = laneKeys.map(lane => ({
+    lane,
+    label:laneLabel(lane),
+    active:activeJobs.filter(x=>x.lane===lane).length,
+    capacity:1
+  }));
 
   return {
     version:metaMap.factory_version ?? "0.6.0",
@@ -239,6 +259,7 @@ async function factorySnapshot(db: D1Database) {
     queue:queue.results,roadmap:roadmap.results,recentReviews:recentReviews.results,blockers:blockers.results,
     activeJobs,recentEvents:recentEvents.results,repos:repos.results,githubOperations:githubOperations.results,
     impact:impact.results,todayImpact:todayImpact.results,feedLog:feedLog.results,agents:agents.results,
+    operatorIssues,laneSummary,parallelLimit:FACTORY_MAX_PARALLEL,
     today:{completed:Number(todayRow?.completed??0),merged:Number(todayRow?.merged??0),waitingHuman:Number(todayRow?.waiting_human??0),total:Number(todayRow?.total??0)}
   };
 }
@@ -254,7 +275,7 @@ export default {
       return json({
         ok: true,
         service: "zihin-factory-governor",
-        phase: "production-loop-dashboard",
+        phase: "multi-lane-operator-dashboard",
         time: new Date().toISOString(),
         meta: meta.results
       });
@@ -274,12 +295,12 @@ export default {
 
     if (request.method === "GET" && (url.pathname === "/status" || url.pathname === "/dashboard/api")) {
       const snapshot = await factorySnapshot(env.DB);
-      return json({ ok:true,phase:"production-loop-dashboard",...snapshot });
+      return json({ ok:true,phase:"multi-lane-operator-dashboard",...snapshot });
     }
 
     if (request.method === "GET" && url.pathname === "/factory") {
       const snapshot = await factorySnapshot(env.DB);
-      return json({ ok:true,phase:"production-loop-dashboard",...snapshot });
+      return json({ ok:true,phase:"multi-lane-operator-dashboard",...snapshot });
     }
 
     if (request.method === "GET" && url.pathname === "/github/status") {
@@ -412,7 +433,7 @@ export default {
     return json({
       ok:true,
       service:"zihin-factory-governor",
-      phase:"production-loop-dashboard",
+      phase:"multi-lane-operator-dashboard",
       routes:[
         "GET /health (public)",
         "GET /dashboard (public shell; token entered in browser)",

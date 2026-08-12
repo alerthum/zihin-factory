@@ -16,6 +16,27 @@ export type GovernorCycleResult = {
   projectFeeder?: ProjectFeederResult;
 };
 
+
+export const FACTORY_MAX_PARALLEL = 4;
+
+export type FactoryLane = "research" | "content" | "code" | "qa" | "release";
+
+export function laneForRole(role: string | null | undefined): FactoryLane {
+  const r = String(role ?? "");
+  if (["Research Scout","Source Auditor","Structure Miner","Curriculum Mapper"].includes(r)) return "research";
+  if (["Factory Designer","Generator","Solver","Distractor Engineer","Tutor Designer","Game Planner","Psychometrician"].includes(r)) return "content";
+  if (["Codex Engineer"].includes(r)) return "code";
+  if (["QA Supervisor","Child Reviewer","Fairness Reviewer","IP/Security Reviewer"].includes(r)) return "qa";
+  if (["Release Manager"].includes(r)) return "release";
+  return "content";
+}
+
+export function laneLabel(lane: FactoryLane): string {
+  return ({research:"Araştırma / Keşif",content:"İçerik / Tasarım",code:"Kod",qa:"Bağımsız Kalite",release:"Yayın / Release"} as Record<FactoryLane,string>)[lane];
+}
+
+const LANE_CAPACITY: Record<FactoryLane,number> = {research:1,content:1,code:1,qa:1,release:1};
+
 type RoadmapRow = {
   id: string;
   sequence_no: number;
@@ -161,55 +182,82 @@ async function providerCooldownRemainingMs(db: D1Database): Promise<number> {
   return Math.max(0,until-Date.now());
 }
 
-async function materializeNextRoadmapJob(db: D1Database): Promise<number> {
+async function occupiedLaneCounts(db: D1Database): Promise<{ total:number; lanes:Record<FactoryLane,number> }> {
+  const rows = await db.prepare(
+    `SELECT w.payload_json,r.agent_role
+     FROM WORK_QUEUE w LEFT JOIN FACTORY_ROADMAP r ON r.work_queue_id=w.id
+     WHERE w.status IN ('queued','running','verify')`
+  ).all<{payload_json:string;agent_role:string|null}>();
+  const lanes: Record<FactoryLane,number> = {research:0,content:0,code:0,qa:0,release:0};
+  for (const row of rows.results) {
+    let payload: Record<string,unknown> = {};
+    try { payload = JSON.parse(row.payload_json || "{}"); } catch { payload = {}; }
+    const lane = laneForRole(row.agent_role ?? String(payload.agentRole ?? ""));
+    lanes[lane]++;
+  }
+  return {total:rows.results.length,lanes};
+}
+
+async function materializeEligibleRoadmapJobs(
+  db: D1Database,
+  maxToCreate: number,
+  laneCounts: Record<FactoryLane,number>
+): Promise<number> {
+  if (maxToCreate <= 0) return 0;
   const candidates = await db.prepare(
     `SELECT id,sequence_no,title,job_type,agent_role,objective,acceptance_json,depends_on_json,payload_json,status
      FROM FACTORY_ROADMAP
      WHERE status='ready'
      ORDER BY sequence_no ASC
-     LIMIT 20`
+     LIMIT 60`
   ).all<RoadmapRow>();
 
+  let created = 0;
   for (const item of candidates.results) {
+    if (created >= maxToCreate) break;
     const deps = parseStringArray(item.depends_on_json);
-    if (!(await dependenciesDone(db, deps))) continue;
+    if (!(await dependenciesDone(db,deps))) continue;
+    const lane = laneForRole(item.agent_role);
+    if ((laneCounts[lane] ?? 0) >= LANE_CAPACITY[lane]) continue;
 
     const jobId = crypto.randomUUID();
-    let extraPayload: Record<string, unknown> = {};
+    let extraPayload: Record<string,unknown> = {};
     try { extraPayload = JSON.parse(item.payload_json || "{}"); } catch { extraPayload = {}; }
-
     const payload = {
-      ...extraPayload,
-      roadmapId: item.id,
-      roadmapTitle: item.title,
-      agentRole: item.agent_role,
-      objective: item.objective,
-      acceptanceCriteria: parseStringArray(item.acceptance_json),
-      maxRevisionAttempts: 2
+      ...extraPayload,roadmapId:item.id,roadmapTitle:item.title,agentRole:item.agent_role,
+      factoryLane:lane,objective:item.objective,acceptanceCriteria:parseStringArray(item.acceptance_json),maxRevisionAttempts:2
     };
-
     await db.batch([
-      db.prepare(
-        `INSERT INTO WORK_QUEUE(id,job_type,status,priority,payload_json)
-         VALUES (?,?,'queued',10,?)`
-      ).bind(jobId, item.job_type, JSON.stringify(payload)),
-      db.prepare(
-        `UPDATE FACTORY_ROADMAP
-         SET status='dispatched',work_queue_id=?,updated_at=CURRENT_TIMESTAMP
-         WHERE id=? AND status='ready'`
-      ).bind(jobId, item.id),
-      db.prepare(
-        `INSERT INTO JOB_DECISIONS(job_id,decision_type,actor_role,data_json)
-         VALUES (?,'MATERIALIZE','Governor',?)`
-      ).bind(jobId, JSON.stringify({ roadmapId: item.id, title: item.title }))
+      db.prepare(`INSERT INTO WORK_QUEUE(id,job_type,status,priority,payload_json) VALUES (?,?,'queued',10,?)`).bind(jobId,item.job_type,JSON.stringify(payload)),
+      db.prepare(`UPDATE FACTORY_ROADMAP SET status='dispatched',work_queue_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='ready'`).bind(jobId,item.id),
+      db.prepare(`INSERT INTO JOB_DECISIONS(job_id,decision_type,actor_role,data_json) VALUES (?,'MATERIALIZE','Governor',?)`).bind(jobId,JSON.stringify({roadmapId:item.id,title:item.title,lane}))
     ]);
-    return 1;
+    laneCounts[lane]=(laneCounts[lane]??0)+1;
+    created++;
   }
+  return created;
+}
 
-  return 0;
+async function recoverKnownFixedFailures(db: D1Database): Promise<number> {
+  const rows = await db.prepare(
+    `SELECT id,title,work_queue_id FROM FACTORY_ROADMAP
+     WHERE status='blocked' AND result_summary LIKE '%code_patch_json_parse_failed%'
+     ORDER BY updated_at ASC LIMIT 10`
+  ).all<{id:string;title:string;work_queue_id:string|null}>();
+  let count=0;
+  for (const row of rows.results) {
+    await db.batch([
+      db.prepare(`UPDATE FACTORY_ROADMAP SET status='ready',work_queue_id=NULL,result_summary='0.6.1 JSON onarım motoru ile otomatik yeniden sıraya alındı',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='blocked'`).bind(row.id),
+      db.prepare(`UPDATE BLOCKERS SET status='resolved',updated_at=CURRENT_TIMESTAMP WHERE status='open' AND summary=?`).bind(row.title),
+      db.prepare(`INSERT INTO METRICS(metric_name,metric_value,metric_text,scope) VALUES ('known_failure_auto_recovered',1,?,'factory')`).bind(JSON.stringify({roadmapId:row.id,previousJobId:row.work_queue_id,reason:'code_patch_json_parse_failed'}))
+    ]);
+    count++;
+  }
+  return count;
 }
 
 async function enqueueQueuedJobs(env: GovernorEnv, limit = 3): Promise<number> {
+  if (limit <= 0) return 0;
   const rows = await env.DB.prepare(
     `SELECT id FROM WORK_QUEUE
      WHERE status='queued' AND workflow_instance_id IS NULL
@@ -301,66 +349,48 @@ export async function seedRoadmap(db: D1Database): Promise<{ inserted: number }>
 }
 
 export async function governorCycle(env: GovernorEnv): Promise<GovernorCycleResult> {
-  const enabled = (await stateValue(env.DB, "continuous_enabled")) === "1";
-  if (!enabled) {
-    return { enabled: false, materialized: 0, enqueued: 0, active: 0, action: "paused" };
-  }
+  const enabled = (await stateValue(env.DB,"continuous_enabled")) === "1";
+  if (!enabled) return {enabled:false,materialized:0,enqueued:0,active:0,action:"paused"};
 
   const owner = crypto.randomUUID();
-  if (!(await acquireLock(env.DB, owner))) {
-    return { enabled: true, materialized: 0, enqueued: 0, active: 0, action: "lock-busy" };
-  }
+  if (!(await acquireLock(env.DB,owner))) return {enabled:true,materialized:0,enqueued:0,active:0,action:"lock-busy"};
 
   try {
-    if (env.FACTORY_WORKFLOW) {
-      await recoverStaleJobs(env as GovernorEnv & { FACTORY_WORKFLOW: Workflow },5);
-    }
-
+    if (env.FACTORY_WORKFLOW) await recoverStaleJobs(env as GovernorEnv & {FACTORY_WORKFLOW:Workflow},5);
     const projectFeeder = await projectFeederCycle(env);
-    const reconciled = await reconcileDispatchedRoadmap(env.DB);
+    const reconciled = (await reconcileDispatchedRoadmap(env.DB)) + (await recoverKnownFixedFailures(env.DB));
 
-    const activeRow = await env.DB.prepare(
-      `SELECT COUNT(*) AS count FROM WORK_QUEUE WHERE status IN ('running','verify')`
-    ).first<{ count: number }>();
+    const activeRow = await env.DB.prepare(`SELECT COUNT(*) AS count FROM WORK_QUEUE WHERE status IN ('running','verify')`).first<{count:number}>();
     const active = Number(activeRow?.count ?? 0);
+    const occupied = await occupiedLaneCounts(env.DB);
 
     const cooldownMs = await providerCooldownRemainingMs(env.DB);
-    if (active === 0 && cooldownMs > 0) {
-      const action = `provider-cooldown-${Math.ceil(cooldownMs/1000)}s`;
+    if (occupied.total === 0 && cooldownMs > 0) {
+      const action=`provider-cooldown-${Math.ceil(cooldownMs/1000)}s`;
       await setState(env.DB,"last_governor_action",action);
       await setState(env.DB,"last_governor_at",new Date().toISOString());
-      return { enabled:true,materialized:0,enqueued:0,active:0,action,reconciled,projectFeeder };
+      return {enabled:true,materialized:0,enqueued:0,active,action,reconciled,projectFeeder};
     }
 
-    let materialized = 0;
-    if (active === 0) {
-      const queuedRow = await env.DB.prepare(
-        `SELECT COUNT(*) AS count FROM WORK_QUEUE WHERE status='queued'`
-      ).first<{ count: number }>();
-      if (Number(queuedRow?.count ?? 0) === 0) {
-        materialized = await materializeNextRoadmapJob(env.DB);
-      }
-    }
+    const slots = Math.max(0,FACTORY_MAX_PARALLEL-occupied.total);
+    const materialized = await materializeEligibleRoadmapJobs(env.DB,slots,occupied.lanes);
+    const dispatchSlots = Math.max(0,FACTORY_MAX_PARALLEL-active);
+    const enqueued = await enqueueQueuedJobs(env,dispatchSlots);
 
-    const enqueued = await enqueueQueuedJobs(env, Math.max(1, 2 - active));
-    const action = materialized > 0
-      ? "materialized-and-enqueued"
-      : enqueued > 0
-        ? "enqueued-existing"
-        : active > 0
-          ? "waiting-active"
-          : "idle";
+    const after = await occupiedLaneCounts(env.DB);
+    const action = materialized>0 || enqueued>0
+      ? `multi-lane-dispatch-${after.total}/${FACTORY_MAX_PARALLEL}`
+      : after.total>0
+        ? `multi-lane-running-${after.total}/${FACTORY_MAX_PARALLEL}`
+        : "idle";
 
-    await setState(env.DB, "last_governor_action", action);
-    await setState(env.DB, "last_governor_at", new Date().toISOString());
-    await env.DB.prepare(
-      `INSERT INTO METRICS(metric_name,metric_value,metric_text,scope)
-       VALUES ('governor_cycle',?,?, 'factory')`
-    ).bind(materialized + enqueued, action).run();
-
-    return { enabled: true, materialized, enqueued, active, action, reconciled, projectFeeder };
+    await setState(env.DB,"last_governor_action",action);
+    await setState(env.DB,"last_governor_at",new Date().toISOString());
+    await setState(env.DB,"factory_parallel_limit",String(FACTORY_MAX_PARALLEL));
+    await env.DB.prepare(`INSERT INTO METRICS(metric_name,metric_value,metric_text,scope) VALUES ('governor_cycle',?,?, 'factory')`).bind(materialized+enqueued,action).run();
+    return {enabled:true,materialized,enqueued,active,action,reconciled,projectFeeder};
   } finally {
-    await releaseLock(env.DB, owner);
+    await releaseLock(env.DB,owner);
   }
 }
 

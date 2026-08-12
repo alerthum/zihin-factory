@@ -65,8 +65,38 @@ function balancedObject(text: string): string | null {
   return null;
 }
 
+function repairJsonLike(text: string): string {
+  const src = text.replace(/[“”]/g,'"').replace(/[‘’]/g,"'");
+  let out = "";
+  let quoted = false;
+  let escaped = false;
+  for (let i=0;i<src.length;i++) {
+    const ch = src[i];
+    if (quoted) {
+      if (escaped) {
+        const valid = /["\\/bfnrtu]/.test(ch);
+        if (!valid) out += "\\";
+        out += ch;
+        escaped = false;
+        continue;
+      }
+      if (ch === "\\") { out += ch; escaped = true; continue; }
+      if (ch === '"') { out += ch; quoted = false; continue; }
+      if (ch === "\n") { out += "\\n"; continue; }
+      if (ch === "\r") { out += "\\r"; continue; }
+      if (ch === "\t") { out += "\\t"; continue; }
+      out += ch;
+      continue;
+    }
+    if (ch === '"') { quoted = true; out += ch; continue; }
+    out += ch;
+  }
+  return out.replace(/,\s*([}\]])/g,"$1");
+}
+
 function parseObject(text: string): Record<string,unknown> | null {
-  const candidates = [stripFences(text),balancedObject(text)].filter(Boolean) as string[];
+  const raw = [stripFences(text),balancedObject(text)].filter(Boolean) as string[];
+  const candidates = [...raw,...raw.map(repairJsonLike)];
   for (const c of candidates) {
     try {
       const value = JSON.parse(c);

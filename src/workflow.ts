@@ -4,7 +4,8 @@ import { sendTelegram } from "./notifications/telegram";
 import { routeAgent } from "./agents/router";
 import { reviewOutput, type QualityReview } from "./quality/gate";
 import { createProjectDraftPr, getRepo, getRepoTree, getTextFile } from "./providers/github";
-import { candidateRepoPaths, parsePathSelection, parseAndApplyPatchProposal, patchReviewArtifact } from "./project/repo-tools";
+import { candidateRepoPaths, parsePathSelection, parseAndApplyPatchProposal, patchReviewArtifact, type AppliedPatch } from "./project/repo-tools";
+import { guidanceForError, guidanceTelegramText } from "./operations/guidance";
 
 export type FactoryJobParams = { jobId: string };
 
@@ -89,6 +90,49 @@ async function touchJob(db: D1Database, jobId: string, runId: string, eventType:
     db.prepare(`UPDATE WORK_QUEUE SET updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(jobId),
     db.prepare(`INSERT INTO RUN_EVENTS(run_id,event_type,message) VALUES (?,?,?)`).bind(runId,eventType,message)
   ]);
+}
+
+
+async function parsePatchWithAutoRepair(
+  env: Env,
+  step: WorkflowStep,
+  input: {
+    raw: string;
+    sourceMap: Map<string,string>;
+    maxFiles: number;
+    jobId: string;
+    runId: string;
+    label: string;
+    patchContract: string;
+    evidence: string;
+    preferredModels?: string[];
+  }
+): Promise<{ proposal: AppliedPatch; normalizedRaw: string; repairModel?: string }> {
+  try {
+    return { proposal: parseAndApplyPatchProposal(input.raw,input.sourceMap,input.maxFiles), normalizedRaw: input.raw };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message !== "code_patch_json_parse_failed") throw error;
+  }
+
+  await step.do(`product patch json repair started ${input.label}`, async () =>
+    touchJob(env.DB,input.jobId,input.runId,"product_patch_json_repair_started","Kod patch JSON formatı otomatik onarılıyor"));
+
+  const repaired = await step.do(`product patch json repair ${input.label}`, {retries:{limit:1,delay:"5 seconds",backoff:"exponential"}}, async () => runNvidiaText(env,{
+    system:`You are a strict JSON repair agent. Return JSON only. Do not invent paths or code. Preserve the intended edits. ${input.patchContract}`,
+    prompt:`MALFORMED PATCH OUTPUT:
+${input.raw}
+
+AUTHORITATIVE LIVE SOURCE FILES:
+${input.evidence}
+
+Repair only the serialization/contract shape. Return one complete valid patch JSON object.`,
+    maxTokens:1350,temperature:0,purpose:"coder",preferredModels:input.preferredModels,onHeartbeat:() => providerHeartbeat(env.DB,input.jobId)
+  }));
+  const proposal = parseAndApplyPatchProposal(repaired.content,input.sourceMap,input.maxFiles);
+  await step.do(`product patch json repair completed ${input.label}`, async () =>
+    touchJob(env.DB,input.jobId,input.runId,"product_patch_json_repair_completed",`Kod patch JSON formatı düzeltildi (${repaired.model})`));
+  return {proposal,normalizedRaw:repaired.content,repairModel:repaired.model};
 }
 
 async function providerHeartbeat(db: D1Database, jobId: string): Promise<void> {
@@ -252,11 +296,12 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
           prompt:`OBJECTIVE:\n${objective}\n\nACCEPTANCE CRITERIA:\n${acceptanceCriteria.map((x,i)=>`${i+1}. ${x}`).join("\n")}\n\nFOCUS:\n${focus}\n\nLIVE SOURCE FILES:\n${evidence}\n\nProduce the smallest concrete patch now.`,
           maxTokens:1200,temperature:0.05,purpose:"coder",onHeartbeat:() => providerHeartbeat(this.env.DB,jobId)
         }));
-        let proposal = parseAndApplyPatchProposal(producer.content,sourceMap,maxFiles);
+        let parsedPatch = await parsePatchWithAutoRepair(this.env,step,{raw:producer.content,sourceMap,maxFiles,jobId,runId,label:"1",patchContract,evidence,preferredModels:[producer.model]});
+        let proposal = parsedPatch.proposal;
         let reviewArtifact = patchReviewArtifact(proposal);
         await step.do("product patch proposal persisted 1", async () => this.env.DB.prepare(
           `INSERT INTO ARTIFACTS(id,job_id,kind,name,metadata_json) VALUES (?,?,'code-patch-proposal','Product code patch attempt 1',?)`
-        ).bind(crypto.randomUUID(),jobId,JSON.stringify({model:producer.model,attempt,summary:proposal.summary,files:proposal.changes.map(x=>({path:x.path,editCount:x.editCount})),verification:proposal.verification,rawProposal:producer.content.slice(0,9000)})).run());
+        ).bind(crypto.randomUUID(),jobId,JSON.stringify({model:producer.model,repairModel:parsedPatch.repairModel??null,attempt,summary:proposal.summary,files:proposal.changes.map(x=>({path:x.path,editCount:x.editCount})),verification:proposal.verification,rawProposal:producer.content.slice(0,9000),normalizedProposal:parsedPatch.normalizedRaw.slice(0,9000)})).run());
 
         await step.do("product patch qa started 1", async () => touchJob(this.env.DB,jobId,runId,"product_patch_qa_started","Independent code patch QA attempt 1 started"));
         let review = await step.do("product patch qa 1", {retries:{limit:1,delay:"6 seconds",backoff:"exponential"}}, async () => reviewOutput(this.env,{
@@ -273,11 +318,12 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
             prompt:`OBJECTIVE:\n${objective}\n\nACCEPTANCE CRITERIA:\n${acceptanceCriteria.map((x,i)=>`${i+1}. ${x}`).join("\n")}\n\nQA REVISION INSTRUCTIONS:\n${review.revisionInstructions || review.reasons.join("; ")}\n\nPREVIOUS PATCH JSON:\n${producer.content}\n\nLIVE SOURCE FILES (authoritative):\n${evidence}\n\nReturn a complete corrected patch JSON.`,
             maxTokens:1200,temperature:0.03,purpose:"coder",preferredModels:[producer.model],onHeartbeat:() => providerHeartbeat(this.env.DB,jobId)
           }));
-          proposal = parseAndApplyPatchProposal(producer.content,sourceMap,maxFiles);
+          parsedPatch = await parsePatchWithAutoRepair(this.env,step,{raw:producer.content,sourceMap,maxFiles,jobId,runId,label:"2",patchContract,evidence,preferredModels:[producer.model]});
+          proposal = parsedPatch.proposal;
           reviewArtifact = patchReviewArtifact(proposal);
           await step.do("product patch proposal persisted 2", async () => this.env.DB.prepare(
             `INSERT INTO ARTIFACTS(id,job_id,kind,name,metadata_json) VALUES (?,?,'code-patch-proposal','Product code patch attempt 2',?)`
-          ).bind(crypto.randomUUID(),jobId,JSON.stringify({model:producer.model,attempt,summary:proposal.summary,files:proposal.changes.map(x=>({path:x.path,editCount:x.editCount})),verification:proposal.verification,rawProposal:producer.content.slice(0,9000)})).run());
+          ).bind(crypto.randomUUID(),jobId,JSON.stringify({model:producer.model,repairModel:parsedPatch.repairModel??null,attempt,summary:proposal.summary,files:proposal.changes.map(x=>({path:x.path,editCount:x.editCount})),verification:proposal.verification,rawProposal:producer.content.slice(0,9000),normalizedProposal:parsedPatch.normalizedRaw.slice(0,9000)})).run());
           review = await step.do("product patch qa 2", {retries:{limit:1,delay:"6 seconds",backoff:"exponential"}}, async () => reviewOutput(this.env,{
             objective,acceptanceCriteria,producerRole:"Codex Engineer",producerModel:producer.model,output:reviewArtifact,attempt,onHeartbeat:() => providerHeartbeat(this.env.DB,jobId)
           }));
@@ -323,7 +369,12 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
           if (roadmapId) statements.push(this.env.DB.prepare(`UPDATE FACTORY_ROADMAP SET status=?,result_summary=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(finalDecision,finalReview.reasons.join("; ").slice(0,1000),roadmapId));
           await this.env.DB.batch(statements);
         });
-        await notifyBestEffort(this.env,`🟠 Zihin Factory ürün patch fail-closed\n${roadmapTitle}\n${finalReview.decision} ${finalReview.score}/100`);
+        await notifyBestEffort(this.env,`🟠 Zihin Factory kalite kapısı ürüne yazmayı durdurdu
+Görev: ${roadmapTitle}
+Kalite: ${finalReview.score}/100 • Karar: ${finalReview.decision}
+Ne oldu: Bağımsız kalite kapısı patch'i yayınlanacak kadar güvenli/güçlü bulmadı.
+Fabrika ne yapıyor: Patch GitHub'a uygulanmadı; bağımsız diğer hatlar çalışmaya devam ediyor.
+Sizin yapacağınız: Hiçbir şey. Dashboard açıkça güvenli yeniden deneme önermedikçe Retry kullanmayın.`);
         await wakeGovernor(this.env,"product-patch-fail-closed");
         return {jobId,runId,result};
       }
@@ -508,7 +559,11 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
           if (roadmapId) statements.push(this.env.DB.prepare(`UPDATE FACTORY_ROADMAP SET status='blocked',result_summary=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(review.reasons.join("; ").slice(0,1000),roadmapId));
           await this.env.DB.batch(statements);
         });
-        await notifyBestEffort(this.env,`🟠 Zihin Factory BLOCKED\n${String(payload.roadmapTitle ?? jobId)}\n${review.reasons.slice(0,3).join("\n")}`);
+        await notifyBestEffort(this.env,`🔴 Zihin Factory görev engellendi
+Görev: ${String(payload.roadmapTitle ?? jobId)}
+Ne oldu: ${review.reasons.slice(0,3).join("; ")}
+Fabrika ne yapıyor: Görev fail-closed tutuluyor; riskli çıktı ürüne uygulanmıyor.
+Sizin yapacağınız: Dashboard > Sorunlar / Çözümler bölümündeki öneriyi izleyin. Güvenli yeniden dene görünmüyorsa müdahale etmeyin.`);
       } else {
         await step.do("mark quarantine", async () => {
           const statements = [
@@ -519,7 +574,12 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
           if (roadmapId) statements.push(this.env.DB.prepare(`UPDATE FACTORY_ROADMAP SET status='quarantine',result_summary=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(review.reasons.join("; ").slice(0,1000),roadmapId));
           await this.env.DB.batch(statements);
         });
-        await notifyBestEffort(this.env,`🟠 Zihin Factory QUARANTINE\n${String(payload.roadmapTitle ?? jobId)}\nQA: ${review.score}/100`);
+        await notifyBestEffort(this.env,`🟠 Zihin Factory kalite karantinası
+Görev: ${String(payload.roadmapTitle ?? jobId)}
+Kalite: ${review.score}/100
+Ne oldu: Revizyonlardan sonra bazı kabul kriterleri yeterince güçlü karşılanmadı.
+Fabrika ne yapıyor: Çıktıyı yayınlamıyor ve bağımsız diğer görevlerle devam ediyor.
+Sizin yapacağınız: Hiçbir şey. Rastgele Retry kullanmayın.`);
       }
 
       await wakeGovernor(this.env,`job-${review.decision.toLowerCase()}`);
@@ -552,9 +612,8 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
         }
         await this.env.DB.batch(statements);
       });
-      await notifyBestEffort(this.env, transientProviderFailure
-        ? `🟡 Zihin Factory NVIDIA geçici hatası; otomatik retry planlandı\nJob: ${jobId}\n${message.slice(0,1200)}`
-        : `❌ Zihin Factory işi başarısız\nJob: ${jobId}\n${message.slice(0,2000)}`);
+      const operatorGuidance = guidanceForError(message,transientProviderFailure ? "retry-scheduled" : "blocked");
+      await notifyBestEffort(this.env, `${guidanceTelegramText(operatorGuidance,message)}\nGörev: ${String(failedPayload.roadmapTitle ?? jobId)}`);
       await wakeGovernor(this.env,"job-failed");
       throw error;
     }

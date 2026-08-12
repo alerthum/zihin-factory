@@ -4,6 +4,7 @@ export const SCHEMA_STATEMENTS = [
 `CREATE TABLE IF NOT EXISTS WORK_QUEUE (id TEXT PRIMARY KEY,job_type TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'queued',priority INTEGER NOT NULL DEFAULT 100,payload_json TEXT NOT NULL DEFAULT '{}',result_json TEXT,attempts INTEGER NOT NULL DEFAULT 0,workflow_instance_id TEXT,error_text TEXT,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,started_at TEXT,completed_at TEXT,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
 `CREATE INDEX IF NOT EXISTS IX_WORK_QUEUE_STATUS_PRIORITY ON WORK_QUEUE(status,priority,created_at)`,
 `CREATE INDEX IF NOT EXISTS IX_WORK_QUEUE_STATUS_UPDATED ON WORK_QUEUE(status,updated_at)`,
+`CREATE INDEX IF NOT EXISTS IX_WORK_QUEUE_STATUS_CREATED ON WORK_QUEUE(status,created_at)`,
 `CREATE TABLE IF NOT EXISTS RUNS (id TEXT PRIMARY KEY,job_id TEXT,status TEXT NOT NULL,started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,completed_at TEXT,result_json TEXT,error_text TEXT)`,
 `CREATE INDEX IF NOT EXISTS IX_RUNS_JOB_STATUS ON RUNS(job_id,status)`,
 `CREATE TABLE IF NOT EXISTS RUN_EVENTS (id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL,event_type TEXT NOT NULL,message TEXT,data_json TEXT,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
@@ -38,7 +39,7 @@ export async function ensureSchema(db: D1Database): Promise<void> {
   if (Date.now() < schemaReadyUntil) return;
   for (const sql of SCHEMA_STATEMENTS) await db.prepare(sql).run();
 
-  for (const [key,value] of [["schema_version","6"],["factory_version","0.6.0"]]) {
+  for (const [key,value] of [["schema_version","7"],["factory_version","0.6.1"]]) {
     await db.prepare(
       `INSERT INTO FACTORY_META(key,value,updated_at) VALUES (?,?,CURRENT_TIMESTAMP)
        ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP`
@@ -50,9 +51,10 @@ export async function ensureSchema(db: D1Database): Promise<void> {
     ["g8_turkish_research","10/10"],
     ["g8_turkish_verified_integration","7/10"],
     ["g8_turkish_live","blocked"],
-    ["factory_phase","production-loop-dashboard"],
+    ["factory_phase","multi-lane-operator-dashboard"],
     ["continuous_enabled","0"],
     ["project_feeder_enabled","1"],
+    ["factory_parallel_limit","4"],
     ["project_completion_percent","82"],
     ["project_completion_source","baseline-manual"]
   ];
