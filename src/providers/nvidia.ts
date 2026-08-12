@@ -1,5 +1,7 @@
 export type NvidiaPurpose = "producer" | "reviewer" | "coder";
 
+export type ProviderAttemptEvent = { purpose: NvidiaPurpose; model: string; outcome: "start" | "success" | "failure"; latencyMs?: number; error?: string };
+
 export type NvidiaResult = {
   model: string;
   content: string;
@@ -32,11 +34,12 @@ const PRODUCER_MODELS = [
 ];
 
 const REVIEWER_MODELS = [
-  "meta/llama-3.1-70b-instruct",
-  "qwen/qwen2.5-72b-instruct",
+  "meta/llama-3.3-70b-instruct",
   "mistralai/mistral-small-3.1-24b-instruct-2503",
+  "qwen/qwen2.5-72b-instruct",
+  "meta/llama-3.1-8b-instruct",
   "nvidia/llama-3.3-nemotron-super-49b-v1.5",
-  "meta/llama-3.1-8b-instruct"
+  "meta/llama-3.1-70b-instruct"
 ];
 
 const CODER_MODELS = [
@@ -88,7 +91,7 @@ function candidateOrder(
   ordered.push(...dynamic);
 
   if (ordered.length === 0) {
-    ordered.push(...ids.filter(isTextModel));
+    ordered.push(...ids.filter(id => !avoid.has(id) && isTextModel(id)));
   }
 
   return ordered;
@@ -243,6 +246,7 @@ export async function runNvidiaText(
     avoidModels?: string[];
     preferredModels?: string[];
     onHeartbeat?: () => Promise<void> | void;
+    onAttempt?: (event: ProviderAttemptEvent) => Promise<void> | void;
   }
 ): Promise<NvidiaResult> {
   try { await input.onHeartbeat?.(); } catch { /* heartbeat is best effort */ }
@@ -250,7 +254,7 @@ export async function runNvidiaText(
   const candidates = candidateOrder(ids, input.purpose ?? "producer", input.avoidModels ?? [], input.preferredModels ?? []);
 
   if (candidates.length === 0) {
-    throw new Error("NVIDIA API connected but no suitable text-generation model was found.");
+    throw new Error("NVIDIA provider cooldown: no healthy text-generation model is currently eligible; automatic retry required.");
   }
 
   const messages: Array<{ role: "system" | "user"; content: string }> = [];
@@ -263,16 +267,21 @@ export async function runNvidiaText(
 
   for (let i = 0; i < maxAttempts; i++) {
     const model = candidates[i];
+    const startedAt = Date.now();
     try {
       try { await input.onHeartbeat?.(); } catch { /* heartbeat is best effort */ }
-      return await streamingCompletion(env, model, {
+      try { await input.onAttempt?.({ purpose:input.purpose ?? "producer",model,outcome:"start" }); } catch { /* telemetry cannot break provider */ }
+      const result = await streamingCompletion(env, model, {
         messages,
         max_tokens: Math.max(64, Math.min(1200, input.maxTokens ?? 900)),
         temperature: input.temperature ?? 0.2
       }, input.onHeartbeat);
+      try { await input.onAttempt?.({ purpose:input.purpose ?? "producer",model,outcome:"success",latencyMs:Date.now()-startedAt }); } catch { /* telemetry cannot break provider */ }
+      return result;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       failures.push(`${model}:${message.slice(0, 700)}`);
+      try { await input.onAttempt?.({ purpose:input.purpose ?? "producer",model,outcome:"failure",latencyMs:Date.now()-startedAt,error:message }); } catch { /* telemetry cannot break provider */ }
       try { await input.onHeartbeat?.(); } catch { /* heartbeat is best effort */ }
     }
   }

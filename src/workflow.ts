@@ -1,5 +1,6 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
-import { runNvidiaText } from "./providers/nvidia";
+import { runFactoryAI } from "./learning/ai";
+import { defectCode, learnedPromptForRole, recordQualityLearning } from "./learning/memory";
 import { sendTelegram } from "./notifications/telegram";
 import { routeAgent } from "./agents/router";
 import { reviewOutput, type QualityReview } from "./quality/gate";
@@ -49,6 +50,7 @@ async function recordQuality(
   input: {
     jobId: string;
     runId: string;
+    producerRole: string;
     producerModel: string;
     attemptNo: number;
     review: QualityReview;
@@ -71,10 +73,22 @@ async function recordQuality(
       JSON.stringify({ reviewerModel:input.review.reviewerModel,attempt:input.attemptNo,parseMode:input.review.parseMode,rawReviewText:input.review.rawReviewText })
     )
   ]);
+  await recordQualityLearning(db,{jobId:input.jobId,runId:input.runId,producerRole:input.producerRole,attemptNo:input.attemptNo,review:input.review});
 }
 
-async function notifyBestEffort(env: Env, text: string): Promise<void> {
-  try { await sendTelegram(env, text); } catch { /* notification cannot alter job truth */ }
+async function notifyBestEffort(env: Env, text: string, notificationKey?: string, cooldownMinutes = 0): Promise<void> {
+  try {
+    if (notificationKey && cooldownMinutes > 0) {
+      const row = await env.DB.prepare(`SELECT last_sent_at,suppressed_count FROM NOTIFICATION_STATE WHERE notification_key=?`).bind(notificationKey).first<{last_sent_at:string|null;suppressed_count:number}>();
+      const last = row?.last_sent_at ? Date.parse(row.last_sent_at.replace(" ","T")+"Z") : 0;
+      if (last && Date.now()-last < cooldownMinutes*60_000) {
+        await env.DB.prepare(`INSERT INTO NOTIFICATION_STATE(notification_key,suppressed_count,updated_at) VALUES (?,1,CURRENT_TIMESTAMP) ON CONFLICT(notification_key) DO UPDATE SET suppressed_count=suppressed_count+1,updated_at=CURRENT_TIMESTAMP`).bind(notificationKey).run();
+        return;
+      }
+    }
+    await sendTelegram(env, text);
+    if (notificationKey) await env.DB.prepare(`INSERT INTO NOTIFICATION_STATE(notification_key,last_sent_at,suppressed_count,updated_at) VALUES (?,CURRENT_TIMESTAMP,0,CURRENT_TIMESTAMP) ON CONFLICT(notification_key) DO UPDATE SET last_sent_at=CURRENT_TIMESTAMP,suppressed_count=0,updated_at=CURRENT_TIMESTAMP`).bind(notificationKey).run();
+  } catch { /* notification cannot alter job truth */ }
 }
 
 async function wakeGovernor(env: Env, source: string): Promise<void> {
@@ -118,7 +132,7 @@ async function parsePatchWithAutoRepair(
   await step.do(`product patch json repair started ${input.label}`, async () =>
     touchJob(env.DB,input.jobId,input.runId,"product_patch_json_repair_started","Kod patch JSON formatı otomatik onarılıyor"));
 
-  const repaired = await step.do(`product patch json repair ${input.label}`, {retries:{limit:1,delay:"5 seconds",backoff:"exponential"}}, async () => runNvidiaText(env,{
+  const repaired = await step.do(`product patch json repair ${input.label}`, {retries:{limit:1,delay:"5 seconds",backoff:"exponential"}}, async () => runFactoryAI(env,{
     system:`You are a strict JSON repair agent. Return JSON only. Do not invent paths or code. Preserve the intended edits. ${input.patchContract}`,
     prompt:`MALFORMED PATCH OUTPUT:
 ${input.raw}
@@ -183,7 +197,7 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
       if (job.job_type === "ai.smoke-test") {
         const payload = safeJson(job.payload_json);
         const prompt = String(payload.prompt ?? "Return ZIHIN_FACTORY_AI_OK");
-        const ai = await step.do("nvidia smoke", async () => runNvidiaText(this.env,{ prompt,system:String(payload.system ?? "Be concise."),maxTokens:500 }));
+        const ai = await step.do("nvidia smoke", async () => runFactoryAI(this.env,{ prompt,system:String(payload.system ?? "Be concise."),maxTokens:500 }));
         const result = { ok:true,kind:"ai.smoke-test",model:ai.model,content:ai.content,usage:ai.usage };
         const resultJson = JSON.stringify(result);
         await step.do("persist smoke", async () => {
@@ -259,7 +273,7 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
         const candidates = candidateRepoPaths(tree,focus,140);
         if (candidates.length === 0) throw new Error("product_patch_no_candidate_paths");
 
-        const selector = await step.do("product patch path selector", {retries:{limit:1,delay:"5 seconds",backoff:"exponential"}}, async () => runNvidiaText(this.env,{
+        const selector = await step.do("product patch path selector", {retries:{limit:1,delay:"5 seconds",backoff:"exponential"}}, async () => runFactoryAI(this.env,{
           system:"You are a repository path selector. Return strict JSON only. Never invent paths. Select existing files most likely to contain the requested implementation/test surface.",
           prompt:`FOCUS:\n${focus}\n\nLIVE REPOSITORY PATH CANDIDATES:\n${candidates.map((x,i)=>`${i+1}. ${x}`).join("\n")}\n\nReturn exactly one JSON object: {"paths":["existing/path.ts", "existing/test.spec.ts"]}. Choose 4-8 paths.`,
           maxTokens:340,temperature:0,purpose:"coder",onHeartbeat:() => providerHeartbeat(this.env.DB,jobId)
@@ -287,11 +301,12 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
         const evidence = sources.map(x=>`FILE ${x.path}\n<<<SOURCE\n${x.content}\nSOURCE`).join("\n\n");
 
         const patchContract = `Return strict JSON only with this shape:\n{"summary":"what and why","verification":["exact repo command"],"changes":[{"path":"one of the supplied files","edits":[{"search":"exact unique existing snippet","replace":"complete replacement snippet"}]}]}\nRules: at most ${maxFiles} changed files; at most 4 exact edits per file; every search must be copied exactly from supplied source and must uniquely match; do not return full files; no markdown; no invented path; preserve existing language/framework; no placeholders; smallest safe patch.`;
-        const coderSystem = `You are the Codex Engineer inside Zihin Factory. Work only from live repository source supplied in this prompt. Never invent a file, API, type, import, test runner, or repository language. Preserve ECD+AIG architecture and game-as-adapter separation. Main branch is read-only; output is only a proposal until independent QA passes. ${patchContract}`;
+        const coderLessons = await step.do("load coder learning memory", async () => learnedPromptForRole(this.env.DB,"Codex Engineer"));
+        const coderSystem = `You are the Codex Engineer inside Zihin Factory. Work only from live repository source supplied in this prompt. Never invent a file, API, type, import, test runner, or repository language. Preserve ECD+AIG architecture and game-as-adapter separation. Main branch is read-only; output is only a proposal until independent QA passes. ${patchContract}${coderLessons}`;
 
         let attempt = 1;
         await step.do("product patch producer started", async () => touchJob(this.env.DB,jobId,runId,"product_patch_producer_started","Codex Engineer patch attempt 1 started"));
-        let producer = await step.do("product patch producer 1", {retries:{limit:1,delay:"7 seconds",backoff:"exponential"}}, async () => runNvidiaText(this.env,{
+        let producer = await step.do("product patch producer 1", {retries:{limit:1,delay:"7 seconds",backoff:"exponential"}}, async () => runFactoryAI(this.env,{
           system:coderSystem,
           prompt:`OBJECTIVE:\n${objective}\n\nACCEPTANCE CRITERIA:\n${acceptanceCriteria.map((x,i)=>`${i+1}. ${x}`).join("\n")}\n\nFOCUS:\n${focus}\n\nLIVE SOURCE FILES:\n${evidence}\n\nProduce the smallest concrete patch now.`,
           maxTokens:1200,temperature:0.05,purpose:"coder",onHeartbeat:() => providerHeartbeat(this.env.DB,jobId)
@@ -307,13 +322,13 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
         let review = await step.do("product patch qa 1", {retries:{limit:1,delay:"6 seconds",backoff:"exponential"}}, async () => reviewOutput(this.env,{
           objective,acceptanceCriteria,producerRole:"Codex Engineer",producerModel:producer.model,output:reviewArtifact,attempt,onHeartbeat:() => providerHeartbeat(this.env.DB,jobId)
         }));
-        await step.do("product patch record qa 1", async () => recordQuality(this.env.DB,{jobId,runId,producerModel:producer.model,attemptNo:attempt,review}));
+        await step.do("product patch record qa 1", async () => recordQuality(this.env.DB,{jobId,runId,producerRole:"Codex Engineer",producerModel:producer.model,attemptNo:attempt,review}));
         await step.do("product patch qa completed 1", async () => touchJob(this.env.DB,jobId,runId,"product_patch_qa_completed",`Independent code patch QA: ${review.decision} ${review.score}/100`));
 
         if (review.decision === "RETRY") {
           attempt = 2;
           await step.do("product patch revision started", async () => touchJob(this.env.DB,jobId,runId,"product_patch_revision_started","Codex Engineer patch revision 2 started"));
-          producer = await step.do("product patch producer 2", {retries:{limit:1,delay:"7 seconds",backoff:"exponential"}}, async () => runNvidiaText(this.env,{
+          producer = await step.do("product patch producer 2", {retries:{limit:1,delay:"7 seconds",backoff:"exponential"}}, async () => runFactoryAI(this.env,{
             system:coderSystem,
             prompt:`OBJECTIVE:\n${objective}\n\nACCEPTANCE CRITERIA:\n${acceptanceCriteria.map((x,i)=>`${i+1}. ${x}`).join("\n")}\n\nQA REVISION INSTRUCTIONS:\n${review.revisionInstructions || review.reasons.join("; ")}\n\nPREVIOUS PATCH JSON:\n${producer.content}\n\nLIVE SOURCE FILES (authoritative):\n${evidence}\n\nReturn a complete corrected patch JSON.`,
             maxTokens:1200,temperature:0.03,purpose:"coder",preferredModels:[producer.model],onHeartbeat:() => providerHeartbeat(this.env.DB,jobId)
@@ -327,7 +342,7 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
           review = await step.do("product patch qa 2", {retries:{limit:1,delay:"6 seconds",backoff:"exponential"}}, async () => reviewOutput(this.env,{
             objective,acceptanceCriteria,producerRole:"Codex Engineer",producerModel:producer.model,output:reviewArtifact,attempt,onHeartbeat:() => providerHeartbeat(this.env.DB,jobId)
           }));
-          await step.do("product patch record qa 2", async () => recordQuality(this.env.DB,{jobId,runId,producerModel:producer.model,attemptNo:attempt,review}));
+          await step.do("product patch record qa 2", async () => recordQuality(this.env.DB,{jobId,runId,producerRole:"Codex Engineer",producerModel:producer.model,attemptNo:attempt,review}));
           await step.do("product patch qa completed 2", async () => touchJob(this.env.DB,jobId,runId,"product_patch_qa_completed",`Independent code patch QA revision: ${review.decision} ${review.score}/100`));
         }
 
@@ -374,7 +389,7 @@ Görev: ${roadmapTitle}
 Kalite: ${finalReview.score}/100 • Karar: ${finalReview.decision}
 Ne oldu: Bağımsız kalite kapısı patch'i yayınlanacak kadar güvenli/güçlü bulmadı.
 Fabrika ne yapıyor: Patch GitHub'a uygulanmadı; bağımsız diğer hatlar çalışmaya devam ediyor.
-Sizin yapacağınız: Hiçbir şey. Dashboard açıkça güvenli yeniden deneme önermedikçe Retry kullanmayın.`);
+Sizin yapacağınız: Hiçbir şey. Dashboard açıkça güvenli yeniden deneme önermedikçe Retry kullanmayın.`,`quality-quarantine:Codex Engineer:${defectCode(finalReview.reasons[0] ?? "quality")}`,60);
         await wakeGovernor(this.env,"product-patch-fail-closed");
         return {jobId,runId,result};
       }
@@ -409,6 +424,8 @@ Sizin yapacağınız: Hiçbir şey. Dashboard açıkça güvenli yeniden deneme 
         ? payload.acceptanceCriteria.map(String)
         : [];
       const routed = routeAgent(job.job_type,payload);
+      const roleLessons = await step.do("load role learning memory", async () => learnedPromptForRole(this.env.DB,routed.role));
+      const learnedSystemPrompt = `${routed.systemPrompt}${roleLessons}`;
       const maxRevisionAttempts = Math.max(0,Math.min(2,Number(payload.maxRevisionAttempts ?? 2)));
 
       let attempt = 1;
@@ -416,8 +433,8 @@ Sizin yapacağınız: Hiçbir şey. Dashboard açıkça güvenli yeniden deneme 
       let producer = await step.do(
         "producer attempt 1",
         { retries:{ limit:1,delay:"8 seconds",backoff:"exponential" } },
-        async () => runNvidiaText(this.env,{
-          system:routed.systemPrompt,
+        async () => runFactoryAI(this.env,{
+          system:learnedSystemPrompt,
           prompt:`OBJECTIVE:\n${objective}\n\nACCEPTANCE CRITERIA:\n${acceptanceCriteria.map((x,i)=>`${i+1}. ${x}`).join("\n") || "1. Materially satisfy the objective."}\n\nCONTEXT:\n${JSON.stringify(runtimeContext,null,2)}\n\nProduce the artifact now.`,
           maxTokens:1050,
           temperature:0.15,
@@ -443,7 +460,7 @@ Sizin yapacağınız: Hiçbir şey. Dashboard açıkça güvenli yeniden deneme 
         onHeartbeat:() => providerHeartbeat(this.env.DB,jobId)
       }));
       await step.do("qa completed heartbeat 1", async () => touchJob(this.env.DB,jobId,runId,"qa_completed",`Independent QA attempt 1 completed: ${review.decision} ${review.score}/100`));
-      await step.do("record quality 1", async () => recordQuality(this.env.DB,{ jobId,runId,producerModel:producer.model,attemptNo:attempt,review }));
+      await step.do("record quality 1", async () => recordQuality(this.env.DB,{ jobId,runId,producerRole:routed.role,producerModel:producer.model,attemptNo:attempt,review }));
 
       while (review.decision === "RETRY" && attempt <= maxRevisionAttempts) {
         attempt++;
@@ -454,8 +471,8 @@ Sizin yapacağınız: Hiçbir şey. Dashboard açıkça güvenli yeniden deneme 
         producer = await step.do(
           `producer revision ${attempt}`,
           { retries:{ limit:1,delay:"8 seconds",backoff:"exponential" } },
-          async () => runNvidiaText(this.env,{
-            system:routed.systemPrompt,
+          async () => runFactoryAI(this.env,{
+            system:learnedSystemPrompt,
             prompt:`Revise the artifact.\n\nOBJECTIVE:\n${objective}\n\nACCEPTANCE CRITERIA:\n${acceptanceCriteria.map((x,i)=>`${i+1}. ${x}`).join("\n")}\n\nQA REVISION INSTRUCTIONS:\n${instructions}\n\nPREVIOUS ARTIFACT:\n${previous}\n\nReturn the full corrected artifact, not a commentary about changes.`,
             maxTokens:1100,temperature:0.1,purpose:routed.purpose,
             preferredModels:[initialProducerModel,"meta/llama-3.3-70b-instruct","mistralai/mistral-small-3.1-24b-instruct-2503"],
@@ -479,7 +496,7 @@ Sizin yapacağınız: Hiçbir şey. Dashboard açıkça güvenli yeniden deneme 
           onHeartbeat:() => providerHeartbeat(this.env.DB,jobId)
         }));
         await step.do(`qa completed heartbeat ${attempt}`, async () => touchJob(this.env.DB,jobId,runId,"qa_revision_completed",`Independent QA attempt ${attempt} completed: ${review.decision} ${review.score}/100`));
-        await step.do(`record quality ${attempt}`, async () => recordQuality(this.env.DB,{ jobId,runId,producerModel:producer.model,attemptNo:attempt,review }));
+        await step.do(`record quality ${attempt}`, async () => recordQuality(this.env.DB,{ jobId,runId,producerRole:routed.role,producerModel:producer.model,attemptNo:attempt,review }));
       }
 
       if (review.decision === "RETRY" && review.score >= 75 && review.deterministicIssues.length === 0) {
@@ -490,8 +507,8 @@ Sizin yapacağınız: Hiçbir şey. Dashboard açıkça güvenli yeniden deneme 
         producer = await step.do(
           "supervisor escalation producer",
           { retries:{ limit:1,delay:"8 seconds",backoff:"exponential" } },
-          async () => runNvidiaText(this.env,{
-            system:`${routed.systemPrompt}\nSENIOR ESCALATION: Previous revisions were close but did not pass. Produce implementation-ready evidence for every acceptance criterion. Do not merely restate requirements.`,
+          async () => runFactoryAI(this.env,{
+            system:`${learnedSystemPrompt}\nSENIOR ESCALATION: Previous revisions were close but did not pass. Produce implementation-ready evidence for every acceptance criterion. Do not merely restate requirements.`,
             prompt:`OBJECTIVE:\n${objective}\n\nACCEPTANCE CRITERIA:\n${acceptanceCriteria.map((x,i)=>`${i+1}. ${x}`).join("\n")}\n\nFINAL QA INSTRUCTIONS:\n${instructions}\n\nPREVIOUS ARTIFACT:\n${previous}\n\nReturn one complete, concrete corrected artifact.`,
             maxTokens:1200,temperature:0.08,purpose:routed.purpose,
             preferredModels:[initialProducerModel,"meta/llama-3.3-70b-instruct","mistralai/mistral-small-3.1-24b-instruct-2503"],
@@ -509,7 +526,7 @@ Sizin yapacağınız: Hiçbir şey. Dashboard açıkça güvenli yeniden deneme 
           onHeartbeat:() => providerHeartbeat(this.env.DB,jobId)
         }));
         await step.do("supervisor escalation qa completed", async () => touchJob(this.env.DB,jobId,runId,"supervisor_escalation_qa_completed",`Senior escalation QA completed: ${review.decision} ${review.score}/100`));
-        await step.do("record supervisor escalation quality", async () => recordQuality(this.env.DB,{jobId,runId,producerModel:producer.model,attemptNo:attempt,review}));
+        await step.do("record supervisor escalation quality", async () => recordQuality(this.env.DB,{jobId,runId,producerRole:routed.role,producerModel:producer.model,attemptNo:attempt,review}));
       }
 
       if (review.decision === "RETRY") {
@@ -579,7 +596,7 @@ Görev: ${String(payload.roadmapTitle ?? jobId)}
 Kalite: ${review.score}/100
 Ne oldu: Revizyonlardan sonra bazı kabul kriterleri yeterince güçlü karşılanmadı.
 Fabrika ne yapıyor: Çıktıyı yayınlamıyor ve bağımsız diğer görevlerle devam ediyor.
-Sizin yapacağınız: Hiçbir şey. Rastgele Retry kullanmayın.`);
+Sizin yapacağınız: Hiçbir şey. Rastgele Retry kullanmayın.`,`quality-quarantine:${routed.role}:${defectCode(review.reasons[0] ?? "quality")}`,60);
       }
 
       await wakeGovernor(this.env,`job-${review.decision.toLowerCase()}`);
@@ -613,7 +630,7 @@ Sizin yapacağınız: Hiçbir şey. Rastgele Retry kullanmayın.`);
         await this.env.DB.batch(statements);
       });
       const operatorGuidance = guidanceForError(message,transientProviderFailure ? "retry-scheduled" : "blocked");
-      await notifyBestEffort(this.env, `${guidanceTelegramText(operatorGuidance,message)}\nGörev: ${String(failedPayload.roadmapTitle ?? jobId)}`);
+      await notifyBestEffort(this.env, `${guidanceTelegramText(operatorGuidance,message)}\nGörev: ${String(failedPayload.roadmapTitle ?? jobId)}`,`error:${operatorGuidance.code}`,operatorGuidance.code === "provider-temporary" ? 60 : 30);
       await wakeGovernor(this.env,"job-failed");
       throw error;
     }

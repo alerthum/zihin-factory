@@ -4,6 +4,8 @@ import { getRepo } from "./providers/github";
 import { projectFeederCycle } from "./project/feeder";
 import { dashboardHtml } from "./dashboard/html";
 import { guidanceForError } from "./operations/guidance";
+import { learningSummary } from "./learning/memory";
+import { maybeSendFactoryDigest } from "./notifications/digest";
 export { FactoryWorkflow } from "./workflow";
 
 type Env = {
@@ -44,7 +46,7 @@ async function markPhase(db: D1Database): Promise<void> {
   if (phaseMarked) return;
   await db.prepare(
     `INSERT INTO PROJECT_STATE(key,value,updated_at)
-     VALUES ('factory_phase','project-director-production-engine',CURRENT_TIMESTAMP)
+     VALUES ('factory_phase','learning-project-director',CURRENT_TIMESTAMP)
      ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP`
   ).run();
   phaseMarked = true;
@@ -284,6 +286,7 @@ async function factorySnapshot(db: D1Database) {
     FROM PROJECT_IMPACT WHERE datetime(created_at) >= datetime('now','-6 hours') AND pr_number IS NOT NULL`).first<{waiting:number|null;merged:number|null;total:number|null}>();
   const directorFeeds = await db.prepare(`SELECT action,COUNT(*) AS count FROM PROJECT_FEED_LOG
     WHERE datetime(created_at) >= datetime('now','-6 hours') AND action IN ('DIRECTOR_SEED','PROMOTE_RECON_TO_CODE') GROUP BY action`).all<{action:string;count:number}>();
+  const learning = await learningSummary(db);
   const meta = await db.prepare(`SELECT key,value FROM FACTORY_META ORDER BY key`).all<{key:string;value:string}>();
   const stateMap = Object.fromEntries(state.results.map(x=>[x.key,x.value]));
   const metaMap = Object.fromEntries(meta.results.map(x=>[x.key,x.value]));
@@ -298,12 +301,12 @@ async function factorySnapshot(db: D1Database) {
   }));
 
   return {
-    version:metaMap.factory_version ?? "0.7.0",
+    version:metaMap.factory_version ?? "0.8.0",
     state:state.results,stateMap,
     queue:queue.results,roadmap:roadmapView,eligibleRoadmap,blockedReadyRoadmap,recentReviews:recentReviews.results,blockers:blockers.results,
     activeJobs,startingJobs,recentEvents:recentEvents.results,repos:repos.results,githubOperations:githubOperations.results,
     impact:impact.results,todayImpact:todayImpact.results,feedLog:feedLog.results,agents:agents.results,
-    operatorIssues,laneSummary,parallelLimit:FACTORY_MAX_PARALLEL,
+    operatorIssues,laneSummary,parallelLimit:FACTORY_MAX_PARALLEL,learning,
     last6h:{jobs:Number(last6h?.jobs??0),completed:Number(last6h?.completed??0),quarantine:Number(last6h?.quarantine??0),blocked:Number(last6h?.blocked??0),failed:Number(last6h?.failed??0),active:Number(last6h?.active??0),prs:Number(last6hPr?.total??0),prsWaiting:Number(last6hPr?.waiting??0),prsMerged:Number(last6hPr?.merged??0),directorFeeds:Object.fromEntries(directorFeeds.results.map(x=>[x.action,Number(x.count??0)]))},
     today:{completed:Number(todayRow?.completed??0),merged:Number(todayRow?.merged??0),waitingHuman:Number(todayRow?.waiting_human??0),total:Number(todayRow?.total??0)}
   };
@@ -320,7 +323,7 @@ export default {
       return json({
         ok: true,
         service: "zihin-factory-governor",
-        phase: "project-director-production-engine",
+        phase: "learning-project-director",
         time: new Date().toISOString(),
         meta: meta.results
       });
@@ -340,12 +343,12 @@ export default {
 
     if (request.method === "GET" && (url.pathname === "/status" || url.pathname === "/dashboard/api")) {
       const snapshot = await factorySnapshot(env.DB);
-      return json({ ok:true,phase:"project-director-production-engine",...snapshot });
+      return json({ ok:true,phase:"learning-project-director",...snapshot });
     }
 
     if (request.method === "GET" && url.pathname === "/factory") {
       const snapshot = await factorySnapshot(env.DB);
-      return json({ ok:true,phase:"project-director-production-engine",...snapshot });
+      return json({ ok:true,phase:"learning-project-director",...snapshot });
     }
 
     if (request.method === "GET" && url.pathname === "/github/status") {
@@ -478,7 +481,7 @@ export default {
     return json({
       ok:true,
       service:"zihin-factory-governor",
-      phase:"project-director-production-engine",
+      phase:"learning-project-director",
       routes:[
         "GET /health (public)",
         "GET /dashboard (public shell; token entered in browser)",
@@ -530,5 +533,6 @@ export default {
     await ensureSchema(env.DB);
     await markPhase(env.DB);
     await governorCycle(env);
+    await maybeSendFactoryDigest(env);
   }
 };

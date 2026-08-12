@@ -19,7 +19,7 @@ export function guidanceForError(raw: string | null | undefined, status = ""): O
       severity: "warning",
       title: "Yapay zekâ sağlayıcısında geçici bağlantı sorunu",
       whatHappened: "NVIDIA modeli zamanında veya kullanılabilir içerikle cevap veremedi. Bu, proje kodunun bozulduğu anlamına gelmez.",
-      factoryAction: "Fabrika işi güvenli şekilde bırakır, sağlayıcı bekleme süresi uygular ve otomatik yeniden dener.",
+      factoryAction: "Fabrika başarısız modeli sağlık tablosunda geçici olarak soğutur, aynı amaç için daha sağlıklı modeli öne alır ve yalnız bütün uygun modeller tükenirse otomatik yeniden deneme planlar.",
       userAction: "Hiçbir şey yapmayın. Dashboard 'otomatik tekrar planlandı' diyorsa Retry veya Recover düğmesine basmayın.",
       autoHandled: true,
       allowManualRetry: false
@@ -32,7 +32,7 @@ export function guidanceForError(raw: string | null | undefined, status = ""): O
       severity: "warning",
       title: "Kod değişikliği çıktısının formatı okunamadı",
       whatHappened: "Codex Engineer kod önerisini üretti ancak makinenin beklediği JSON sözleşmesine tam uymadı.",
-      factoryAction: "0.7.0 ve sonrası önce yerel JSON onarımı, ardından gerektiğinde ayrı JSON düzeltme ajanı kullanır. Eski bu tip bloklar Governor tarafından bir kez otomatik yeniden sıraya alınır.",
+      factoryAction: "0.8.0 ve sonrası önce yerel JSON onarımı, ardından gerektiğinde ayrı JSON düzeltme ajanı kullanır. Eski bu tip bloklar Governor tarafından bir kez otomatik yeniden sıraya alınır.",
       userAction: "Hiçbir şey yapmayın. Aynı hata yeni sürümde tekrar kalıcı BLOCKED olursa Dashboard size açıkça 'Güvenli yeniden dene' önerisi gösterecek.",
       autoHandled: true,
       allowManualRetry: false
@@ -71,7 +71,7 @@ export function guidanceForError(raw: string | null | undefined, status = ""): O
       severity: "info",
       title: "Kalite kapısı çıktıyı karantinaya aldı",
       whatHappened: "Çıktı üretildi fakat bağımsız kalite kontrol yayınlanacak kadar güçlü bulmadı.",
-      factoryAction: "Çıktı GitHub'a/ürüne uygulanmaz. Bağımsız diğer görevler çalışmaya devam eder.",
+      factoryAction: "Çıktı GitHub'a/ürüne uygulanmaz. QA nedenleri kalıcı fabrika dersine çevrilir; aynı rolün sonraki görevleri bu dersi prompt öncesi yükler ve bağımsız diğer görevler çalışmaya devam eder.",
       userAction: "Retry düğmesine rastgele basmayın. Bu bir güvenlik davranışıdır; yeni üst seviye görev veya farklı yaklaşım gerektiğinde fabrika kendisi planlar.",
       autoHandled: true,
       allowManualRetry: false

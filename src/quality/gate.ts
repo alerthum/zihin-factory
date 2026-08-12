@@ -1,4 +1,4 @@
-import { runNvidiaText } from "../providers/nvidia";
+import { runFactoryAI } from "../learning/ai";
 import { qaSystemPrompt } from "../agents/router";
 
 export type QualityDecision = "PASS" | "RETRY" | "QUARANTINE" | "BLOCKED";
@@ -14,7 +14,7 @@ export type QualityReview = {
   rawReviewText: string;
 };
 
-type QualityEnv = { NVIDIA_API_KEY: string };
+type QualityEnv = { NVIDIA_API_KEY: string; DB: D1Database };
 
 function deterministicChecks(output: string): string[] {
   const issues: string[] = [];
@@ -167,7 +167,7 @@ Decision rules:
 - BLOCKED: cannot be completed without missing external data/access/decision; state exactly what is missing.
 `;
 
-  const response = await runNvidiaText(env, {
+  const response = await runFactoryAI(env, {
     system: `${qaSystemPrompt()}\nOUTPUT CONTRACT: Never emit chain-of-thought, <think> tags, markdown fences, or prose outside the requested JSON object.`,
     prompt,
     maxTokens: 360,
