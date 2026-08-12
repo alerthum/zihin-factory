@@ -103,7 +103,7 @@ Decision rules:
   const response = await runNvidiaText(env, {
     system: qaSystemPrompt(),
     prompt,
-    maxTokens: 700,
+    maxTokens: 450,
     temperature: 0.05,
     purpose: "reviewer",
     avoidModels: [input.producerModel]

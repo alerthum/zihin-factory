@@ -162,7 +162,7 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
         async () => runNvidiaText(this.env,{
           system:routed.systemPrompt,
           prompt:`OBJECTIVE:\n${objective}\n\nACCEPTANCE CRITERIA:\n${acceptanceCriteria.map((x,i)=>`${i+1}. ${x}`).join("\n") || "1. Materially satisfy the objective."}\n\nCONTEXT:\n${JSON.stringify(payload.context ?? {},null,2)}\n\nProduce the artifact now.`,
-          maxTokens:1400,
+          maxTokens:900,
           temperature:0.15,
           purpose:routed.purpose
         })
@@ -196,7 +196,7 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
           async () => runNvidiaText(this.env,{
             system:routed.systemPrompt,
             prompt:`Revise the artifact.\n\nOBJECTIVE:\n${objective}\n\nACCEPTANCE CRITERIA:\n${acceptanceCriteria.map((x,i)=>`${i+1}. ${x}`).join("\n")}\n\nQA REVISION INSTRUCTIONS:\n${instructions}\n\nPREVIOUS ARTIFACT:\n${previous}\n\nReturn the full corrected artifact, not a commentary about changes.`,
-            maxTokens:1500,temperature:0.1,purpose:routed.purpose
+            maxTokens:950,temperature:0.1,purpose:routed.purpose
           })
         );
 
@@ -279,6 +279,7 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
       const message = error instanceof Error ? error.message : String(error);
       const failedPayload = safeJson(job.payload_json) as AutonomousPayload & Record<string, unknown>;
       const failedRoadmapId = typeof failedPayload.roadmapId === "string" ? failedPayload.roadmapId : null;
+      const transientProviderFailure = /NVIDIA|HTTP[_ ]?(?:429|5\d\d)|524|timeout|stream_idle|stream_total|provider exhausted/i.test(message);
 
       await step.do("mark job failed", async () => {
         const statements = [
@@ -287,7 +288,14 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
           this.env.DB.prepare(`INSERT INTO RUN_EVENTS(run_id,event_type,message) VALUES (?,'workflow_failed',?)`).bind(runId,message.slice(0,4000)),
           this.env.DB.prepare(`INSERT INTO JOB_DECISIONS(job_id,decision_type,actor_role,data_json) VALUES (?,'EXECUTION_FAILED','Governor',?)`).bind(jobId,JSON.stringify({ error:message.slice(0,2000) }))
         ];
-        if (failedRoadmapId) {
+        if (failedRoadmapId && transientProviderFailure) {
+          const retryNotBefore = new Date(Date.now() + 90_000).toISOString();
+          statements.push(
+            this.env.DB.prepare(`UPDATE FACTORY_ROADMAP SET status='ready',work_queue_id=NULL,result_summary=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND work_queue_id=?`).bind(`Transient NVIDIA failure; automatic retry scheduled: ${message.slice(0,700)}`,failedRoadmapId,jobId),
+            this.env.DB.prepare(`INSERT INTO PROJECT_STATE(key,value,updated_at) VALUES ('provider_retry_not_before',?,CURRENT_TIMESTAMP) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP`).bind(retryNotBefore),
+            this.env.DB.prepare(`INSERT INTO RUN_EVENTS(run_id,event_type,message) VALUES (?,'provider_retry_scheduled',?)`).bind(runId,`Automatic provider retry after ${retryNotBefore}`)
+          );
+        } else if (failedRoadmapId) {
           statements.push(
             this.env.DB.prepare(`UPDATE FACTORY_ROADMAP SET status='blocked',result_summary=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND work_queue_id=?`).bind(`Execution failure: ${message.slice(0,900)}`,failedRoadmapId,jobId),
             this.env.DB.prepare(`INSERT INTO BLOCKERS(id,scope,severity,status,summary,details) VALUES (?,'factory','high','open',?,?)`).bind(crypto.randomUUID(),String(failedPayload.roadmapTitle ?? "Autonomous execution failure"),message.slice(0,3000))
@@ -295,7 +303,9 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
         }
         await this.env.DB.batch(statements);
       });
-      await notifyBestEffort(this.env,`❌ Zihin Factory işi başarısız\nJob: ${jobId}\n${message.slice(0,2000)}`);
+      await notifyBestEffort(this.env, transientProviderFailure
+        ? `🟡 Zihin Factory NVIDIA geçici hatası; otomatik retry planlandı\nJob: ${jobId}\n${message.slice(0,1200)}`
+        : `❌ Zihin Factory işi başarısız\nJob: ${jobId}\n${message.slice(0,2000)}`);
       await wakeGovernor(this.env,"job-failed");
       throw error;
     }

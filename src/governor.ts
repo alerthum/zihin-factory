@@ -10,6 +10,7 @@ export type GovernorCycleResult = {
   enqueued: number;
   active: number;
   action: string;
+  reconciled?: number;
 };
 
 type RoadmapRow = {
@@ -74,6 +75,87 @@ async function dependenciesDone(db: D1Database, ids: string[]): Promise<boolean>
     if (!row || row.status !== "done") return false;
   }
   return true;
+}
+
+function isTransientProviderError(value: string | null): boolean {
+  return /NVIDIA|HTTP[_ ]?(?:429|5\d\d)|524|timeout|stream_idle|stream_total|provider exhausted/i.test(value ?? "");
+}
+
+async function reconcileDispatchedRoadmap(db: D1Database): Promise<number> {
+  const rows = await db.prepare(
+    `SELECT r.id AS roadmap_id,r.work_queue_id,w.status AS job_status,w.error_text,w.result_json
+     FROM FACTORY_ROADMAP r
+     LEFT JOIN WORK_QUEUE w ON w.id=r.work_queue_id
+     WHERE r.status='dispatched'
+       AND (w.id IS NULL OR w.status IN ('failed','abandoned','blocked','quarantine','completed'))
+     ORDER BY r.sequence_no
+     LIMIT 20`
+  ).all<{
+    roadmap_id: string;
+    work_queue_id: string | null;
+    job_status: string | null;
+    error_text: string | null;
+    result_json: string | null;
+  }>();
+
+  let changed = 0;
+  for (const row of rows.results) {
+    if (row.job_status === "completed") {
+      await db.prepare(
+        `UPDATE FACTORY_ROADMAP SET status='done',result_summary=COALESCE(result_summary,'Recovered completed job state'),updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='dispatched'`
+      ).bind(row.roadmap_id).run();
+      changed++;
+      continue;
+    }
+
+    if (row.job_status === "blocked") {
+      await db.prepare(
+        `UPDATE FACTORY_ROADMAP SET status='blocked',result_summary=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='dispatched'`
+      ).bind((row.error_text ?? "Job blocked").slice(0,1000),row.roadmap_id).run();
+      changed++;
+      continue;
+    }
+
+    if (row.job_status === "quarantine") {
+      await db.prepare(
+        `UPDATE FACTORY_ROADMAP SET status='quarantine',result_summary=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='dispatched'`
+      ).bind((row.error_text ?? "Job quarantined").slice(0,1000),row.roadmap_id).run();
+      changed++;
+      continue;
+    }
+
+    if (row.job_status === null || row.job_status === "abandoned" || isTransientProviderError(row.error_text)) {
+      await db.batch([
+        db.prepare(
+          `UPDATE FACTORY_ROADMAP SET status='ready',work_queue_id=NULL,result_summary=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='dispatched'`
+        ).bind(
+          row.job_status === null
+            ? "Recovered orphaned dispatched roadmap item"
+            : `Recovered retryable execution: ${(row.error_text ?? row.job_status).slice(0,800)}`,
+          row.roadmap_id
+        ),
+        db.prepare(
+          `INSERT INTO METRICS(metric_name,metric_value,metric_text,scope) VALUES ('roadmap_reconciled',1,?,'factory')`
+        ).bind(JSON.stringify({ roadmapId: row.roadmap_id, previousJobId: row.work_queue_id, previousStatus: row.job_status }))
+      ]);
+      changed++;
+      continue;
+    }
+
+    await db.prepare(
+      `UPDATE FACTORY_ROADMAP SET status='blocked',result_summary=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='dispatched'`
+    ).bind(`Non-retryable execution failure: ${(row.error_text ?? "unknown").slice(0,850)}`,row.roadmap_id).run();
+    changed++;
+  }
+  return changed;
+}
+
+async function providerCooldownRemainingMs(db: D1Database): Promise<number> {
+  const value = await stateValue(db,"provider_retry_not_before");
+  if (!value) return 0;
+  const until = Date.parse(value);
+  if (!Number.isFinite(until)) return 0;
+  return Math.max(0,until-Date.now());
 }
 
 async function materializeNextRoadmapJob(db: D1Database): Promise<number> {
@@ -225,10 +307,20 @@ export async function governorCycle(env: GovernorEnv): Promise<GovernorCycleResu
       await recoverStaleJobs(env as GovernorEnv & { FACTORY_WORKFLOW: Workflow },4);
     }
 
+    const reconciled = await reconcileDispatchedRoadmap(env.DB);
+
     const activeRow = await env.DB.prepare(
       `SELECT COUNT(*) AS count FROM WORK_QUEUE WHERE status IN ('running','verify')`
     ).first<{ count: number }>();
     const active = Number(activeRow?.count ?? 0);
+
+    const cooldownMs = await providerCooldownRemainingMs(env.DB);
+    if (active === 0 && cooldownMs > 0) {
+      const action = `provider-cooldown-${Math.ceil(cooldownMs/1000)}s`;
+      await setState(env.DB,"last_governor_action",action);
+      await setState(env.DB,"last_governor_at",new Date().toISOString());
+      return { enabled:true,materialized:0,enqueued:0,active:0,action,reconciled };
+    }
 
     let materialized = 0;
     if (active === 0) {
@@ -256,7 +348,7 @@ export async function governorCycle(env: GovernorEnv): Promise<GovernorCycleResu
        VALUES ('governor_cycle',?,?, 'factory')`
     ).bind(materialized + enqueued, action).run();
 
-    return { enabled: true, materialized, enqueued, active, action };
+    return { enabled: true, materialized, enqueued, active, action, reconciled };
   } finally {
     await releaseLock(env.DB, owner);
   }

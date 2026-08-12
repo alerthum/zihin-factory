@@ -1,4 +1,4 @@
-declare class Response { constructor(body?: any, init?: any); ok:boolean; status:number; text():Promise<string>; json():Promise<any>; }
+declare class Response { constructor(body?: any, init?: any); ok:boolean; status:number; body:any; text():Promise<string>; json():Promise<any>; }
 declare class Headers { constructor(init?: any); set(k:string,v:string):void; }
 declare class Request { method:string; url:string; headers:{get(k:string):string|null}; json():Promise<any>; }
 declare class URL { constructor(url:string); pathname:string; }
@@ -27,3 +27,5 @@ declare function setTimeout(fn:()=>void, ms:number): any;
 declare function clearTimeout(id:any): void;
 declare interface WorkflowInstanceStatus { status:string; error?:any; output?:any; rollback?:any; }
 declare interface WorkflowInstance { id:string; status():Promise<WorkflowInstanceStatus>; terminate(options?:{rollback?:boolean}):Promise<void>; }
+
+declare class TextDecoder { decode(input?: any, options?: {stream?: boolean}): string; }
