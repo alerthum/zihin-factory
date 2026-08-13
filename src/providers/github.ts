@@ -9,7 +9,7 @@ export type RepoInfo = {
 
 type FileInfo = { sha: string; content?: string; encoding?: string };
 
-type PullRequestInfo = { number: number; html_url: string; state: string; draft?: boolean; head?: { ref?: string }; base?: { ref?: string } };
+type PullRequestInfo = { number: number; html_url: string; state: string; draft?: boolean; head?: { ref?: string; sha?: string }; base?: { ref?: string } };
 export type RepoTreeEntry = { path: string; type: "blob" | "tree"; sha: string; size?: number };
 
 export type PullRequestState = {
@@ -19,7 +19,7 @@ export type PullRequestState = {
   merged?: boolean;
   merged_at?: string | null;
   html_url: string;
-  head?: { ref?: string };
+  head?: { ref?: string; sha?: string };
   base?: { ref?: string };
 };
 
@@ -239,4 +239,39 @@ export async function getTextFile(env: GitHubEnv, repo: string, path: string, re
 export async function getPullRequest(env: GitHubEnv, repo: string, prNumber: number): Promise<PullRequestState> {
   if (!Number.isInteger(prNumber) || prNumber <= 0) throw new Error("invalid_pr_number");
   return gh<PullRequestState>(env,`/repos/${repo}/pulls/${prNumber}`);
+}
+
+
+export type PullRequestCiState = {
+  state: "pending" | "success" | "failure" | "neutral";
+  headSha: string;
+  summary: string;
+  checks: Array<{name:string;status:string;conclusion:string|null}>;
+  statuses: Array<{context:string;state:string}>;
+};
+
+const CI_FAILURES = new Set(["failure","cancelled","timed_out","action_required","startup_failure","stale"]);
+
+export async function getPullRequestCiState(env: GitHubEnv, repo: string, prNumber: number): Promise<PullRequestCiState> {
+  const pr = await getPullRequest(env,repo,prNumber);
+  const headSha = String(pr.head?.sha ?? "").trim();
+  if (!headSha) throw new Error("github_pr_head_sha_missing");
+
+  const checksData = await gh<{check_runs?:Array<{name?:string;status?:string;conclusion?:string|null}>}>(env,`/repos/${repo}/commits/${headSha}/check-runs?per_page=100`);
+  const statusData = await gh<{statuses?:Array<{context?:string;state?:string}>}>(env,`/repos/${repo}/commits/${headSha}/status`);
+  const checks=(checksData.check_runs??[]).map(x=>({name:String(x.name??"check"),status:String(x.status??"unknown"),conclusion:x.conclusion==null?null:String(x.conclusion)}));
+  const statuses=(statusData.statuses??[]).map(x=>({context:String(x.context??"status"),state:String(x.state??"unknown")}));
+
+  const pending = checks.some(x=>x.status!=="completed") || statuses.some(x=>x.state==="pending");
+  const failedCheck = checks.find(x=>x.status==="completed" && x.conclusion && CI_FAILURES.has(x.conclusion));
+  const failedStatus = statuses.find(x=>x.state==="failure" || x.state==="error");
+  if (failedCheck || failedStatus) {
+    const item=failedCheck ? `${failedCheck.name}:${failedCheck.conclusion}` : `${failedStatus?.context}:${failedStatus?.state}`;
+    return {state:"failure",headSha,summary:`CI failure ${item}`,checks,statuses};
+  }
+  if (pending) return {state:"pending",headSha,summary:"CI checks are still pending",checks,statuses};
+
+  const successful = checks.some(x=>x.status==="completed" && x.conclusion==="success") || statuses.some(x=>x.state==="success");
+  if (successful) return {state:"success",headSha,summary:"All observed CI checks completed without failure",checks,statuses};
+  return {state:"neutral",headSha,summary:"No decisive CI check/status observed yet",checks,statuses};
 }

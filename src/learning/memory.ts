@@ -4,6 +4,11 @@ import type { NvidiaPurpose, ProviderAttemptEvent } from "../providers/nvidia";
 export type LearningEnv = { DB: D1Database };
 
 const LESSON_TEXT: Record<string,string> = {
+  github_ci_failed: "AI QA sonucunu final başarı sayma. Draft PR sonrasında gerçek GitHub CI sonucunu bekle; failure ise hatayı düzeltme turuna geri taşı.",
+  missing_npm_script: "Verification komutundaki her npm run scriptini PR öncesinde package.json scripts ile doğrula; olmayan scripti uydurma.",
+  missing_dependency: "Test veya kodun kullandığı bağımlılığın package manifest/lock içinde gerçekten bulunduğunu doğrula; yerel node_modules varlığına güvenme.",
+  test_only_production_patch: "Gerçek ürün davranışı isteyen görevde yalnız test dosyalarını değiştirerek problemi çözülmüş sayma; production implementasyonuna dokunan gerçek patch üret veya blocker bildir.",
+  workflow_manifest_drift: "CI workflow komutları ile package.json scriptleri arasında drift olup olmadığını deterministic olarak kontrol et.",
   acceptance_coverage: "Her kabul kriterini ayrı ayrı somut kanıt, uygulanabilir değişiklik veya test ile karşıla; genel ifadelerle geçme.",
   verification_not_executable: "Verification bölümünde gerçek repo komutu, deterministic kontrol veya ölçülebilir PASS koşulu ver; 'kontrol edilmeli' gibi soyut cümle kullanma.",
   implementation_not_concrete: "Implementation Details bölümünde gerçek sözleşme, dosya/alan, veri akışı, invariant veya test hedefi ver; danışmanlık dili kullanma.",
@@ -20,6 +25,11 @@ const GLOBAL_DEFECT_CODES = new Set(["acceptance_coverage","verification_not_exe
 
 export function defectCode(detail: string): string {
   const s=String(detail||"").toLowerCase();
+  if (/github_ci_failed|ci failure|github ci fail/.test(s)) return "github_ci_failed";
+  if (/missing_npm_script/.test(s)) return "missing_npm_script";
+  if (/missing_dependency/.test(s)) return "missing_dependency";
+  if (/test_only_production_patch/.test(s)) return "test_only_production_patch";
+  if (/workflow_manifest_drift/.test(s)) return "workflow_manifest_drift";
   if (/acceptance|kabul kriter|criterion|criteria/.test(s) && /(missing|weak|not.*met|yeter|karşılan|coverage|explicit)/.test(s)) return "acceptance_coverage";
   if (/verification|doğrulama/.test(s) && /(missing|vague|weak|command|executable|belirsiz|somut)/.test(s)) return "verification_not_executable";
   if (/implementation|uygulama|implementation-ready|detail/.test(s) && /(missing|weak|vague|not.*clear|belirsiz|insufficient|yetersiz)/.test(s)) return "implementation_not_concrete";
@@ -108,6 +118,19 @@ export async function providerRoutingHints(db:D1Database,purpose:NvidiaPurpose):
   }
   candidates.sort((a,b)=>b.score-a.score);
   return {preferredModels:candidates.map(x=>x.model),avoidModels:avoid};
+}
+
+export async function recordOperationalLearning(db:D1Database,input:{jobId?:string|null;runId?:string|null;producerRole:string;defectCode:string;detail:string;attemptNo?:number}):Promise<void>{
+  const code=input.defectCode || defectCode(input.detail);
+  const lesson=lessonFor(code);
+  await db.batch([
+    db.prepare(`INSERT INTO QUALITY_DEFECTS(id,job_id,run_id,producer_role,defect_code,detail,attempt_no) VALUES (?,?,?,?,?,?,?)`)
+      .bind(crypto.randomUUID(),input.jobId??null,input.runId??null,input.producerRole,code,input.detail.slice(0,3000),input.attemptNo??null),
+    db.prepare(`INSERT INTO FACTORY_LESSONS(id,scope_type,scope_key,defect_code,lesson_text,severity,occurrences,resolved_successes,active,first_seen_at,last_seen_at,updated_at)
+      VALUES (?,'role',?,?,?,'high',1,0,1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
+      ON CONFLICT(scope_type,scope_key,defect_code) DO UPDATE SET occurrences=occurrences+1,lesson_text=excluded.lesson_text,severity='high',active=1,last_seen_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP`)
+      .bind(crypto.randomUUID(),input.producerRole,code,lesson)
+  ]);
 }
 
 export async function learningSummary(db:D1Database){

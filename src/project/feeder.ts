@@ -1,4 +1,5 @@
-import { getPullRequest } from "../providers/github";
+import { getPullRequest, getPullRequestCiState } from "../providers/github";
+import { recordOperationalLearning } from "../learning/memory";
 
 export type ProjectFeederEnv = {
   DB: D1Database;
@@ -11,6 +12,9 @@ export type ProjectFeederResult = {
   merged: number;
   closedUnmerged: number;
   waitingHuman: number;
+  waitingCi: number;
+  ciRetried: number;
+  ciQuarantined: number;
   action: string;
   promoted?: number;
 };
@@ -265,12 +269,12 @@ async function executableBacklogForRoles(db: D1Database, roles: string[]): Promi
   const placeholders=roles.map(()=>"?").join(",");
   const rows=await db.prepare(
     `SELECT status,depends_on_json FROM FACTORY_ROADMAP
-     WHERE agent_role IN (${placeholders}) AND status IN ('ready','dispatched','waiting-human')
+     WHERE agent_role IN (${placeholders}) AND status IN ('ready','dispatched','waiting-ci','waiting-human')
      ORDER BY updated_at DESC LIMIT 120`
   ).bind(...roles).all<{status:string;depends_on_json:string}>();
   let count=0;
   for (const row of rows.results) {
-    if (row.status === "dispatched" || row.status === "waiting-human") { count++; continue; }
+    if (row.status === "dispatched" || row.status === "waiting-ci" || row.status === "waiting-human") { count++; continue; }
     if (await dependencyStatus(db,row.depends_on_json)) count++;
   }
   return count;
@@ -289,7 +293,7 @@ async function nextDirectorCursor(db: D1Database, stream: DirectorStream): Promi
 }
 
 async function seedDirectorBacklog(db: D1Database): Promise<number> {
-  const waitingHuman=await db.prepare(`SELECT COUNT(*) AS count FROM PROJECT_IMPACT WHERE status='waiting-human'`).first<{count:number}>();
+  const waitingHuman=await db.prepare(`SELECT COUNT(*) AS count FROM PROJECT_IMPACT WHERE status IN ('waiting-ci','waiting-human')`).first<{count:number}>();
   let inserted=0;
   const streams: DirectorStream[]=["research","content","qa","release","code"];
   for (const stream of streams) {
@@ -326,7 +330,7 @@ async function seedDirectorBacklog(db: D1Database): Promise<number> {
 }
 
 async function promotePassedReconToCode(db: D1Database): Promise<number> {
-  const waitingHuman=await db.prepare(`SELECT COUNT(*) AS count FROM PROJECT_IMPACT WHERE status='waiting-human'`).first<{count:number}>();
+  const waitingHuman=await db.prepare(`SELECT COUNT(*) AS count FROM PROJECT_IMPACT WHERE status IN ('waiting-ci','waiting-human')`).first<{count:number}>();
   if (Number(waitingHuman?.count ?? 0) > 0) return 0;
   if ((await executableBacklogForStream(db,"code")) >= 1) return 0;
 
@@ -393,17 +397,15 @@ export async function seedProjectRoadmap(db: D1Database): Promise<number> {
   return inserted;
 }
 
-export async function reconcileProductPullRequests(env: ProjectFeederEnv): Promise<{merged:number;closedUnmerged:number;waitingHuman:number}> {
+export async function reconcileProductPullRequests(env: ProjectFeederEnv): Promise<{merged:number;closedUnmerged:number;waitingHuman:number;waitingCi:number;ciRetried:number;ciQuarantined:number}> {
   const rows = await env.DB.prepare(
     `SELECT id,roadmap_id,job_id,repo_full_name,pr_number,pr_url,status
      FROM PROJECT_IMPACT
-     WHERE status='waiting-human' AND pr_number IS NOT NULL AND repo_full_name IS NOT NULL
+     WHERE status IN ('waiting-ci','waiting-human') AND pr_number IS NOT NULL AND repo_full_name IS NOT NULL
      ORDER BY created_at ASC LIMIT 20`
   ).all<{id:string;roadmap_id:string|null;job_id:string|null;repo_full_name:string;pr_number:number;pr_url:string|null;status:string}>();
 
-  let merged = 0;
-  let closedUnmerged = 0;
-  let waitingHuman = 0;
+  let merged = 0, closedUnmerged = 0, waitingHuman = 0, waitingCi = 0, ciRetried = 0, ciQuarantined = 0;
   for (const row of rows.results) {
     try {
       const pr = await getPullRequest(env,row.repo_full_name,Number(row.pr_number));
@@ -411,34 +413,81 @@ export async function reconcileProductPullRequests(env: ProjectFeederEnv): Promi
         await env.DB.batch([
           env.DB.prepare(`UPDATE PROJECT_IMPACT SET status='merged',updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(row.id),
           env.DB.prepare(`UPDATE GITHUB_OPERATIONS SET status='merged',updated_at=CURRENT_TIMESTAMP WHERE job_id=? AND pr_number=?`).bind(row.job_id,row.pr_number),
-          env.DB.prepare(`UPDATE FACTORY_ROADMAP SET status='done',result_summary=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='waiting-human'`).bind(`Draft PR #${row.pr_number} merged; production lane released`,row.roadmap_id),
+          env.DB.prepare(`UPDATE FACTORY_ROADMAP SET status='done',result_summary=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('waiting-ci','waiting-human')`).bind(`Draft PR #${row.pr_number} merged; production lane released`,row.roadmap_id),
           env.DB.prepare(`INSERT INTO PROJECT_FEED_LOG(action,roadmap_id,detail_json) VALUES ('PR_MERGED',?,?)`).bind(row.roadmap_id,JSON.stringify({prNumber:row.pr_number,prUrl:row.pr_url}))
         ]);
         merged++;
-      } else if (pr.state === "closed") {
+        continue;
+      }
+      if (pr.state === "closed") {
         await env.DB.batch([
           env.DB.prepare(`UPDATE PROJECT_IMPACT SET status='closed-unmerged',updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(row.id),
           env.DB.prepare(`UPDATE GITHUB_OPERATIONS SET status='closed-unmerged',updated_at=CURRENT_TIMESTAMP WHERE job_id=? AND pr_number=?`).bind(row.job_id,row.pr_number),
-          env.DB.prepare(`UPDATE FACTORY_ROADMAP SET status='quarantine',result_summary=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='waiting-human'`).bind(`Draft PR #${row.pr_number} closed without merge`,row.roadmap_id),
+          env.DB.prepare(`UPDATE FACTORY_ROADMAP SET status='quarantine',result_summary=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('waiting-ci','waiting-human')`).bind(`Draft PR #${row.pr_number} closed without merge`,row.roadmap_id),
           env.DB.prepare(`INSERT INTO PROJECT_FEED_LOG(action,roadmap_id,detail_json) VALUES ('PR_CLOSED_UNMERGED',?,?)`).bind(row.roadmap_id,JSON.stringify({prNumber:row.pr_number,prUrl:row.pr_url}))
         ]);
         closedUnmerged++;
-      } else {
-        waitingHuman++;
+        continue;
+      }
+
+      {
+        const ci=await getPullRequestCiState(env,row.repo_full_name,Number(row.pr_number));
+        if (ci.state === "success") {
+          await env.DB.batch([
+            env.DB.prepare(`UPDATE PROJECT_IMPACT SET status='waiting-human',summary=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(`Real CI passed: ${ci.summary}`.slice(0,1000),row.id),
+            env.DB.prepare(`UPDATE GITHUB_OPERATIONS SET status='waiting-human',data_json=?,updated_at=CURRENT_TIMESTAMP WHERE job_id=? AND pr_number=?`).bind(JSON.stringify(ci),row.job_id,row.pr_number),
+            env.DB.prepare(`UPDATE FACTORY_ROADMAP SET status='waiting-human',result_summary=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('waiting-ci','waiting-human')`).bind(`Real CI passed for Draft PR #${row.pr_number}; human merge approval waiting`,row.roadmap_id),
+            env.DB.prepare(`INSERT INTO PROJECT_FEED_LOG(action,roadmap_id,detail_json) VALUES ('CI_PASS',?,?)`).bind(row.roadmap_id,JSON.stringify({prNumber:row.pr_number,ci}))
+          ]);
+          waitingHuman++;
+          continue;
+        }
+        if (ci.state === "failure") {
+          const prior=await env.DB.prepare(`SELECT COUNT(*) AS count FROM PROJECT_FEED_LOG WHERE action='CI_RETRY' AND roadmap_id=?`).bind(row.roadmap_id).first<{count:number}>();
+          const retryNo=Number(prior?.count??0)+1;
+          await recordOperationalLearning(env.DB,{jobId:row.job_id,producerRole:"Codex Engineer",defectCode:"github_ci_failed",detail:`github_ci_failed PR #${row.pr_number}: ${ci.summary}`,attemptNo:retryNo});
+          if (retryNo <= 2 && row.roadmap_id) {
+            await env.DB.batch([
+              env.DB.prepare(`UPDATE PROJECT_IMPACT SET status='ci-failed-retry',summary=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(`CI failed; automatic revision ${retryNo}/2: ${ci.summary}`.slice(0,1000),row.id),
+              env.DB.prepare(`UPDATE GITHUB_OPERATIONS SET status='ci-failed',data_json=?,updated_at=CURRENT_TIMESTAMP WHERE job_id=? AND pr_number=?`).bind(JSON.stringify(ci),row.job_id,row.pr_number),
+              env.DB.prepare(`UPDATE FACTORY_ROADMAP SET status='ready',work_queue_id=NULL,result_summary=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('waiting-ci','waiting-human')`).bind(`GitHub CI failed; automatic product revision ${retryNo}/2 queued. ${ci.summary}`.slice(0,1000),row.roadmap_id),
+              env.DB.prepare(`INSERT INTO PROJECT_FEED_LOG(action,roadmap_id,detail_json) VALUES ('CI_RETRY',?,?)`).bind(row.roadmap_id,JSON.stringify({retryNo,prNumber:row.pr_number,ci}))
+            ]);
+            ciRetried++;
+          } else {
+            await env.DB.batch([
+              env.DB.prepare(`UPDATE PROJECT_IMPACT SET status='quarantine-ci',summary=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(`CI revision budget exhausted: ${ci.summary}`.slice(0,1000),row.id),
+              env.DB.prepare(`UPDATE GITHUB_OPERATIONS SET status='quarantine-ci',data_json=?,updated_at=CURRENT_TIMESTAMP WHERE job_id=? AND pr_number=?`).bind(JSON.stringify(ci),row.job_id,row.pr_number),
+              env.DB.prepare(`UPDATE FACTORY_ROADMAP SET status='quarantine',result_summary=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('waiting-ci','waiting-human')`).bind(`GitHub CI failed after revision budget; quarantined. ${ci.summary}`.slice(0,1000),row.roadmap_id),
+              env.DB.prepare(`INSERT INTO PROJECT_FEED_LOG(action,roadmap_id,detail_json) VALUES ('CI_QUARANTINE',?,?)`).bind(row.roadmap_id,JSON.stringify({retryNo,prNumber:row.pr_number,ci}))
+            ]);
+            ciQuarantined++;
+          }
+          continue;
+        }
+        if (row.status === "waiting-human") {
+          await env.DB.batch([
+            env.DB.prepare(`UPDATE PROJECT_IMPACT SET status='waiting-ci',summary=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(`CI not decisive yet: ${ci.summary}`.slice(0,1000),row.id),
+            env.DB.prepare(`UPDATE GITHUB_OPERATIONS SET status='waiting-ci',data_json=?,updated_at=CURRENT_TIMESTAMP WHERE job_id=? AND pr_number=?`).bind(JSON.stringify(ci),row.job_id,row.pr_number),
+            env.DB.prepare(`UPDATE FACTORY_ROADMAP SET status='waiting-ci',result_summary=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='waiting-human'`).bind(`Real CI is not yet decisive for Draft PR #${row.pr_number}; merge gate re-closed`,row.roadmap_id)
+          ]);
+        }
+        waitingCi++;
+        continue;
       }
     } catch (error) {
-      waitingHuman++;
+      if (row.status === "waiting-ci") waitingCi++; else waitingHuman++;
       const message = error instanceof Error ? error.message : String(error);
       await env.DB.prepare(`INSERT INTO PROJECT_FEED_LOG(action,roadmap_id,detail_json) VALUES ('PR_RECONCILE_ERROR',?,?)`)
         .bind(row.roadmap_id,JSON.stringify({prNumber:row.pr_number,error:message.slice(0,600)})).run();
     }
   }
-  return {merged,closedUnmerged,waitingHuman};
+  return {merged,closedUnmerged,waitingHuman,waitingCi,ciRetried,ciQuarantined};
 }
 
 export async function projectFeederCycle(env: ProjectFeederEnv): Promise<ProjectFeederResult> {
   const enabled = (await stateValue(env.DB,"project_feeder_enabled")) !== "0";
-  if (!enabled) return {enabled:false,seeded:0,merged:0,closedUnmerged:0,waitingHuman:0,action:"paused"};
+  if (!enabled) return {enabled:false,seeded:0,merged:0,closedUnmerged:0,waitingHuman:0,waitingCi:0,ciRetried:0,ciQuarantined:0,action:"paused"};
 
   const baselineSeeded = await seedProjectRoadmap(env.DB);
   const promoted = await promotePassedReconToCode(env.DB);
@@ -446,8 +495,8 @@ export async function projectFeederCycle(env: ProjectFeederEnv): Promise<Project
   const seeded = baselineSeeded + promoted + directorSeeded;
   const reconciled = String(env.GITHUB_TOKEN ?? "").trim()
     ? await reconcileProductPullRequests(env)
-    : {merged:0,closedUnmerged:0,waitingHuman:0};
-  const action = seeded > 0 ? "seeded" : reconciled.merged > 0 ? "pr-merged" : reconciled.closedUnmerged > 0 ? "pr-closed" : reconciled.waitingHuman > 0 ? "waiting-human" : "steady";
+    : {merged:0,closedUnmerged:0,waitingHuman:0,waitingCi:0,ciRetried:0,ciQuarantined:0};
+  const action = seeded > 0 ? "seeded" : reconciled.ciRetried > 0 ? "ci-retry" : reconciled.ciQuarantined > 0 ? "ci-quarantine" : reconciled.merged > 0 ? "pr-merged" : reconciled.closedUnmerged > 0 ? "pr-closed" : reconciled.waitingCi > 0 ? "waiting-ci" : reconciled.waitingHuman > 0 ? "waiting-human" : "steady";
   await setState(env.DB,"last_project_feeder_action",action);
   await setState(env.DB,"last_project_feeder_at",new Date().toISOString());
   return {enabled:true,seeded,promoted,...reconciled,action};

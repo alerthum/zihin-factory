@@ -1,7 +1,6 @@
 import { projectFeederCycle, type ProjectFeederResult } from "./project/feeder";
 export type GovernorEnv = {
   DB: D1Database;
-  JOB_QUEUE: Queue;
   FACTORY_WORKFLOW?: Workflow;
   GITHUB_TOKEN?: string;
 };
@@ -256,8 +255,52 @@ async function recoverKnownFixedFailures(db: D1Database): Promise<number> {
   return count;
 }
 
+export async function dispatchQueuedJobDirect(
+  env: GovernorEnv & { FACTORY_WORKFLOW: Workflow },
+  jobId: string,
+  source = "governor"
+): Promise<boolean> {
+  const row = await env.DB.prepare(
+    `SELECT id,status,workflow_instance_id FROM WORK_QUEUE WHERE id=?`
+  ).bind(jobId).first<{id:string;status:string;workflow_instance_id:string|null}>();
+
+  if (!row || row.status !== "queued" || row.workflow_instance_id) return false;
+
+  const workflowInstanceId = `job-${jobId}`;
+  const claim = await env.DB.prepare(
+    `UPDATE WORK_QUEUE
+     SET workflow_instance_id=?,updated_at=CURRENT_TIMESTAMP,error_text=NULL
+     WHERE id=? AND status='queued' AND workflow_instance_id IS NULL`
+  ).bind(workflowInstanceId,jobId).run();
+
+  if (Number(claim.meta?.changes ?? 0) !== 1) return false;
+
+  try {
+    await env.FACTORY_WORKFLOW.createBatch([{ id: workflowInstanceId, params: { jobId } }]);
+    await env.DB.prepare(
+      `INSERT INTO METRICS(metric_name,metric_value,metric_text,scope)
+       VALUES ('direct_workflow_dispatch',1,?,'factory')`
+    ).bind(JSON.stringify({jobId,source,workflowInstanceId})).run();
+    return true;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE WORK_QUEUE
+         SET workflow_instance_id=NULL,error_text=?,updated_at=CURRENT_TIMESTAMP
+         WHERE id=? AND status='queued' AND workflow_instance_id=?`
+      ).bind(`direct_dispatch_failed:${detail}`.slice(0,1000),jobId,workflowInstanceId),
+      env.DB.prepare(
+        `INSERT INTO METRICS(metric_name,metric_value,metric_text,scope)
+         VALUES ('direct_workflow_dispatch_failed',1,?,'factory')`
+      ).bind(JSON.stringify({jobId,source,error:detail.slice(0,700)}))
+    ]);
+    return false;
+  }
+}
+
 async function enqueueQueuedJobs(env: GovernorEnv, limit = 4): Promise<number> {
-  if (limit <= 0) return 0;
+  if (limit <= 0 || !env.FACTORY_WORKFLOW) return 0;
   const rows = await env.DB.prepare(
     `SELECT id FROM WORK_QUEUE
      WHERE status='queued' AND workflow_instance_id IS NULL
@@ -267,8 +310,11 @@ async function enqueueQueuedJobs(env: GovernorEnv, limit = 4): Promise<number> {
 
   let count = 0;
   for (const row of rows.results) {
-    await env.JOB_QUEUE.send({ kind: "job", jobId: row.id, source: "governor" });
-    count++;
+    if (await dispatchQueuedJobDirect(
+      env as GovernorEnv & { FACTORY_WORKFLOW: Workflow },
+      row.id,
+      "governor"
+    )) count++;
   }
   return count;
 }

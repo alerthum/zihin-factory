@@ -1,0 +1,32 @@
+ZIHIN FACTORY - GITHUB UPLOAD PACKAGE
+
+Bu paket yalniz degisen 9 dosyayi icerir.
+ZIP dosyasini GitHub reposuna dosya olarak yuklemeyin.
+ZIP'i bilgisayarinizda acin ve dosyalari ayni repo yollarinin uzerine yazin.
+
+Degisen dosyalar:
+- src/workflow.ts
+- src/providers/github.ts
+- src/project/feeder.ts
+- src/learning/memory.ts
+- src/dashboard/html.ts
+- src/index.ts
+- src/quality/product-gates.ts
+- src/governor.ts
+- wrangler.jsonc
+
+CI hard gate:
+- AI QA final PASS degil
+- Gercek GitHub CI hard gate
+- CI failure revision + learning
+- test-only production patch korumasi
+- npm script preflight
+
+Queue economy:
+- Yeni Cloudflare Queue mesaji uretilmez
+- JOB_QUEUE.send kullanimi kaldirildi
+- Governor queued joblari FACTORY_WORKFLOW.createBatch ile direkt baslatir
+- API/github-smoke direkt Workflow baslatir
+- Workflow completion governor wake mesaji artik Queue kullanmaz
+- wrangler.jsonc queue producer/consumer bindingleri kaldirildi
+- Dakikalik cron durable scheduler olarak kalir

@@ -20,20 +20,5 @@
       "class_name": "FactoryWorkflow"
     }
   ],
-  "queues": {
-    "producers": [
-      { "binding": "JOB_QUEUE", "queue": "zihin-factory-jobs" }
-    ],
-    "consumers": [
-      {
-        "queue": "zihin-factory-jobs",
-        "max_batch_size": 5,
-        "max_batch_timeout": 2,
-        "max_retries": 5,
-        "retry_delay": 15,
-        "dead_letter_queue": "zihin-factory-jobs-dlq"
-      }
-    ]
-  },
   "triggers": { "crons": ["* * * * *"] }
 }

@@ -1,5 +1,5 @@
 import { ensureSchema } from "./schema";
-import { governorCycle, seedRoadmap, setContinuous, recoverStaleJobs, FACTORY_MAX_PARALLEL, laneForRole, laneLabel } from "./governor";
+import { governorCycle, seedRoadmap, setContinuous, recoverStaleJobs, dispatchQueuedJobDirect, FACTORY_MAX_PARALLEL, laneForRole, laneLabel } from "./governor";
 import { getRepo } from "./providers/github";
 import { projectFeederCycle } from "./project/feeder";
 import { dashboardHtml } from "./dashboard/html";
@@ -11,7 +11,6 @@ export { FactoryWorkflow } from "./workflow";
 type Env = {
   DB: D1Database;
   FACTORY_WORKFLOW: Workflow;
-  JOB_QUEUE: Queue;
   FACTORY_ADMIN_TOKEN: string;
   NVIDIA_API_KEY: string;
   TELEGRAM_BOT_TOKEN: string;
@@ -44,11 +43,18 @@ let phaseMarked = false;
 
 async function markPhase(db: D1Database): Promise<void> {
   if (phaseMarked) return;
-  await db.prepare(
-    `INSERT INTO PROJECT_STATE(key,value,updated_at)
-     VALUES ('factory_phase','learning-project-director',CURRENT_TIMESTAMP)
-     ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP`
-  ).run();
+  await db.batch([
+    db.prepare(
+      `INSERT INTO PROJECT_STATE(key,value,updated_at)
+       VALUES ('factory_phase','learning-project-director',CURRENT_TIMESTAMP)
+       ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP`
+    ),
+    db.prepare(
+      `INSERT INTO PROJECT_STATE(key,value,updated_at)
+       VALUES ('dispatch_mode','direct-workflow-no-queue',CURRENT_TIMESTAMP)
+       ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP`
+    )
+  ]);
   phaseMarked = true;
 }
 
@@ -71,36 +77,12 @@ async function jobDetail(db: D1Database, jobId: string) {
 }
 
 async function dispatchJobMessage(env: Env, message: Message<unknown>, body: QueueMessage): Promise<void> {
-  if (body.kind !== "job" || !body.jobId) {
-    message.ack();
-    return;
+  if (body.kind === "job" && body.jobId) {
+    // Backward compatibility for any queue message that existed before queue-free dispatch.
+    // The durable cron/governor also picks up the same queued job, so duplicate starts are
+    // prevented by the D1 workflow_instance_id claim.
+    await dispatchQueuedJobDirect(env,body.jobId,body.source || "legacy-queue");
   }
-
-  const row = await env.DB.prepare(
-    `SELECT id,status,workflow_instance_id FROM WORK_QUEUE WHERE id=?`
-  ).bind(body.jobId).first<JobRow>();
-
-  if (!row) {
-    message.ack();
-    return;
-  }
-
-  if (["completed","failed","blocked","quarantine"].includes(row.status)) {
-    message.ack();
-    return;
-  }
-
-  if (row.workflow_instance_id) {
-    message.ack();
-    return;
-  }
-
-  const workflowInstanceId = `job-${body.jobId}`;
-  await env.FACTORY_WORKFLOW.createBatch([{ id: workflowInstanceId, params: { jobId: body.jobId } }]);
-  await env.DB.prepare(
-    `UPDATE WORK_QUEUE SET workflow_instance_id=?,updated_at=CURRENT_TIMESTAMP
-     WHERE id=? AND workflow_instance_id IS NULL`
-  ).bind(workflowInstanceId, body.jobId).run();
   message.ack();
 }
 
@@ -268,6 +250,7 @@ async function factorySnapshot(db: D1Database) {
        SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) AS completed,
        SUM(CASE WHEN status='merged' THEN 1 ELSE 0 END) AS merged,
        SUM(CASE WHEN status='waiting-human' THEN 1 ELSE 0 END) AS waiting_human,
+       SUM(CASE WHEN status='waiting-ci' THEN 1 ELSE 0 END) AS waiting_ci,
        COUNT(*) AS total
      FROM PROJECT_IMPACT WHERE date(created_at)=date('now')`
   ).first<{completed:number|null;merged:number|null;waiting_human:number|null;total:number|null}>();
@@ -280,7 +263,7 @@ async function factorySnapshot(db: D1Database) {
       SUM(CASE WHEN status IN ('running','verify') THEN 1 ELSE 0 END) AS active
     FROM WORK_QUEUE WHERE datetime(created_at) >= datetime('now','-6 hours')`).first<{jobs:number|null;completed:number|null;quarantine:number|null;blocked:number|null;failed:number|null;active:number|null}>();
   const last6hPr = await db.prepare(`SELECT
-      SUM(CASE WHEN status='waiting-human' THEN 1 ELSE 0 END) AS waiting,
+      SUM(CASE WHEN status IN ('waiting-ci','waiting-human') THEN 1 ELSE 0 END) AS waiting,
       SUM(CASE WHEN status='merged' THEN 1 ELSE 0 END) AS merged,
       COUNT(*) AS total
     FROM PROJECT_IMPACT WHERE datetime(created_at) >= datetime('now','-6 hours') AND pr_number IS NOT NULL`).first<{waiting:number|null;merged:number|null;total:number|null}>();
@@ -398,8 +381,8 @@ export default {
         changes:[{path,content:`# Zihin Factory GitHub Writer Smoke\n\nJob: ${jobId}\nCreated: ${new Date().toISOString()}\n\nThis draft PR proves branch + commit + PR-only write access. It may be closed after verification.\n`}]
       };
       await env.DB.prepare(`INSERT INTO WORK_QUEUE(id,job_type,status,priority,payload_json) VALUES (?,'github.project-pr','queued',5,?)`).bind(jobId,JSON.stringify(payload)).run();
-      await env.JOB_QUEUE.send({kind:"job",jobId,source:"github-smoke"} satisfies QueueMessage);
-      return json({ok:true,jobId,status:"queued",repo:repo.repo_full_name,path},{status:202});
+      const dispatched = await dispatchQueuedJobDirect(env,jobId,"github-smoke");
+      return json({ok:true,jobId,status:dispatched ? "dispatched" : "queued",dispatchMode:"direct-workflow-no-queue",repo:repo.repo_full_name,path},{status:202});
     }
 
     if (request.method === "GET" && url.pathname === "/jobs") {
@@ -474,8 +457,8 @@ export default {
         `INSERT INTO WORK_QUEUE(id,job_type,status,priority,payload_json) VALUES (?,?,'queued',?,?)`
       ).bind(jobId,jobType,priority,JSON.stringify(body.payload ?? {})).run();
 
-      await env.JOB_QUEUE.send({ kind:"job",jobId,source:"api" } satisfies QueueMessage);
-      return json({ ok:true,jobId,status:"queued" }, { status:202 });
+      const dispatched = await dispatchQueuedJobDirect(env,jobId,"api");
+      return json({ ok:true,jobId,status:dispatched ? "dispatched" : "queued",dispatchMode:"direct-workflow-no-queue" }, { status:202 });
     }
 
     return json({

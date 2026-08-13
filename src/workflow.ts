@@ -4,15 +4,15 @@ import { defectCode, learnedPromptForRole, recordQualityLearning } from "./learn
 import { sendTelegram } from "./notifications/telegram";
 import { routeAgent } from "./agents/router";
 import { reviewOutput, type QualityReview } from "./quality/gate";
-import { createProjectDraftPr, getRepo, getRepoTree, getTextFile } from "./providers/github";
+import { createProjectDraftPr, getPullRequestCiState, getRepo, getRepoTree, getTextFile } from "./providers/github";
 import { candidateRepoPaths, parsePathSelection, parseAndApplyPatchProposal, patchReviewArtifact, type AppliedPatch } from "./project/repo-tools";
 import { guidanceForError, guidanceTelegramText } from "./operations/guidance";
+import { applyProductDeterministicIssues, deterministicProductReview, productPatchDeterministicIssues, verificationManifestIssues } from "./quality/product-gates";
 
 export type FactoryJobParams = { jobId: string };
 
 type Env = {
   DB: D1Database;
-  JOB_QUEUE: Queue;
   NVIDIA_API_KEY: string;
   TELEGRAM_BOT_TOKEN: string;
   TELEGRAM_CHAT_ID: string;
@@ -92,10 +92,17 @@ async function notifyBestEffort(env: Env, text: string, notificationKey?: string
 }
 
 async function wakeGovernor(env: Env, source: string): Promise<void> {
+  // Queue-free economy mode: never spend a Cloudflare Queue operation merely to
+  // wake the governor. The minute cron is the durable scheduler. Persisting the
+  // hint keeps the reason observable without creating write/read/delete queue traffic.
   try {
-    await env.JOB_QUEUE.send({ kind: "governor", source });
+    await env.DB.prepare(
+      `INSERT INTO PROJECT_STATE(key,value,updated_at)
+       VALUES ('governor_wake_hint',?,CURRENT_TIMESTAMP)
+       ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP`
+    ).bind(source).run();
   } catch {
-    // Minute cron is the durable fallback.
+    // A wake hint cannot alter job truth; cron remains the durable fallback.
   }
 }
 
@@ -270,6 +277,10 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
         const repoInfo = await step.do("product patch repo info", async () => getRepo(this.env,repoRow.repo_full_name));
         const base = repoRow.default_branch || repoInfo.default_branch;
         const tree = await step.do("product patch repo tree", async () => getRepoTree(this.env,repoRow.repo_full_name,base));
+        const packageManifest = await step.do("product patch package manifest", async () => {
+          try { return (await getTextFile(this.env,repoRow.repo_full_name,"package.json",base,80_000))?.content ?? null; }
+          catch { return null; }
+        });
         const candidates = candidateRepoPaths(tree,focus,140);
         if (candidates.length === 0) throw new Error("product_patch_no_candidate_paths");
 
@@ -313,15 +324,22 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
         }));
         let parsedPatch = await parsePatchWithAutoRepair(this.env,step,{raw:producer.content,sourceMap,maxFiles,jobId,runId,label:"1",patchContract,evidence,preferredModels:[producer.model]});
         let proposal = parsedPatch.proposal;
+        let preflightIssues = [
+          ...productPatchDeterministicIssues({objective,acceptanceCriteria,proposal}),
+          ...verificationManifestIssues(proposal.verification,packageManifest).issues
+        ];
         let reviewArtifact = patchReviewArtifact(proposal);
         await step.do("product patch proposal persisted 1", async () => this.env.DB.prepare(
           `INSERT INTO ARTIFACTS(id,job_id,kind,name,metadata_json) VALUES (?,?,'code-patch-proposal','Product code patch attempt 1',?)`
         ).bind(crypto.randomUUID(),jobId,JSON.stringify({model:producer.model,repairModel:parsedPatch.repairModel??null,attempt,summary:proposal.summary,files:proposal.changes.map(x=>({path:x.path,editCount:x.editCount})),verification:proposal.verification,rawProposal:producer.content.slice(0,9000),normalizedProposal:parsedPatch.normalizedRaw.slice(0,9000)})).run());
 
         await step.do("product patch qa started 1", async () => touchJob(this.env.DB,jobId,runId,"product_patch_qa_started","Independent code patch QA attempt 1 started"));
-        let review = await step.do("product patch qa 1", {retries:{limit:1,delay:"6 seconds",backoff:"exponential"}}, async () => reviewOutput(this.env,{
-          objective,acceptanceCriteria,producerRole:"Codex Engineer",producerModel:producer.model,output:reviewArtifact,attempt,onHeartbeat:() => providerHeartbeat(this.env.DB,jobId)
-        }));
+        let review = preflightIssues.length > 0
+          ? deterministicProductReview(preflightIssues)
+          : await step.do("product patch qa 1", {retries:{limit:1,delay:"6 seconds",backoff:"exponential"}}, async () => reviewOutput(this.env,{
+              objective,acceptanceCriteria,producerRole:"Codex Engineer",producerModel:producer.model,output:reviewArtifact,attempt,onHeartbeat:() => providerHeartbeat(this.env.DB,jobId)
+            }));
+        review = applyProductDeterministicIssues(review,preflightIssues) as QualityReview;
         await step.do("product patch record qa 1", async () => recordQuality(this.env.DB,{jobId,runId,producerRole:"Codex Engineer",producerModel:producer.model,attemptNo:attempt,review}));
         await step.do("product patch qa completed 1", async () => touchJob(this.env.DB,jobId,runId,"product_patch_qa_completed",`Independent code patch QA: ${review.decision} ${review.score}/100`));
 
@@ -335,39 +353,50 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
           }));
           parsedPatch = await parsePatchWithAutoRepair(this.env,step,{raw:producer.content,sourceMap,maxFiles,jobId,runId,label:"2",patchContract,evidence,preferredModels:[producer.model]});
           proposal = parsedPatch.proposal;
+          preflightIssues = [
+            ...productPatchDeterministicIssues({objective,acceptanceCriteria,proposal}),
+            ...verificationManifestIssues(proposal.verification,packageManifest).issues
+          ];
           reviewArtifact = patchReviewArtifact(proposal);
           await step.do("product patch proposal persisted 2", async () => this.env.DB.prepare(
             `INSERT INTO ARTIFACTS(id,job_id,kind,name,metadata_json) VALUES (?,?,'code-patch-proposal','Product code patch attempt 2',?)`
           ).bind(crypto.randomUUID(),jobId,JSON.stringify({model:producer.model,repairModel:parsedPatch.repairModel??null,attempt,summary:proposal.summary,files:proposal.changes.map(x=>({path:x.path,editCount:x.editCount})),verification:proposal.verification,rawProposal:producer.content.slice(0,9000),normalizedProposal:parsedPatch.normalizedRaw.slice(0,9000)})).run());
-          review = await step.do("product patch qa 2", {retries:{limit:1,delay:"6 seconds",backoff:"exponential"}}, async () => reviewOutput(this.env,{
-            objective,acceptanceCriteria,producerRole:"Codex Engineer",producerModel:producer.model,output:reviewArtifact,attempt,onHeartbeat:() => providerHeartbeat(this.env.DB,jobId)
-          }));
+          review = preflightIssues.length > 0
+            ? deterministicProductReview(preflightIssues)
+            : await step.do("product patch qa 2", {retries:{limit:1,delay:"6 seconds",backoff:"exponential"}}, async () => reviewOutput(this.env,{
+                objective,acceptanceCriteria,producerRole:"Codex Engineer",producerModel:producer.model,output:reviewArtifact,attempt,onHeartbeat:() => providerHeartbeat(this.env.DB,jobId)
+              }));
+          review = applyProductDeterministicIssues(review,preflightIssues) as QualityReview;
           await step.do("product patch record qa 2", async () => recordQuality(this.env.DB,{jobId,runId,producerRole:"Codex Engineer",producerModel:producer.model,attemptNo:attempt,review}));
           await step.do("product patch qa completed 2", async () => touchJob(this.env.DB,jobId,runId,"product_patch_qa_completed",`Independent code patch QA revision: ${review.decision} ${review.score}/100`));
         }
 
         if (review.decision === "PASS") {
-          await step.do("product patch github heartbeat", async () => touchJob(this.env.DB,jobId,runId,"product_patch_github_started",`QA PASS; creating Draft PR in ${repoRow.repo_full_name}`));
+          await step.do("product patch github heartbeat", async () => touchJob(this.env.DB,jobId,runId,"product_patch_github_started",`AI QA PASS; deterministic preflight PASS; creating Draft PR in ${repoRow.repo_full_name}; real CI still required`));
           const pr = await step.do("product patch create draft pr", {retries:{limit:1,delay:"8 seconds",backoff:"exponential"}}, async () => createProjectDraftPr(this.env,{
             repo:repoRow.repo_full_name,jobId,title:roadmapTitle,summary:`${proposal.summary}\n\nVerification:\n${proposal.verification.map(x=>`- ${x}`).join("\n")}\n\nIndependent QA: ${review.score}/100.`,baseBranch:base,
             changes:proposal.changes.map(x=>({path:x.path,content:x.content}))
           }));
-          const result = {ok:true,kind:"product.code-patch",roadmapId,impactArea,qa:review,summary:proposal.summary,verification:proposal.verification,files:proposal.changes.map(x=>x.path),...pr};
+          const ci = await step.do("product patch initial ci observation", {retries:{limit:1,delay:"4 seconds",backoff:"exponential"}}, async () => getPullRequestCiState(this.env,pr.repo,pr.prNumber));
+          const productStatus = ci.state === "success" ? "waiting-human" : "waiting-ci";
+          const result = {ok:ci.state === "success",kind:"product.code-patch",phase:productStatus,roadmapId,impactArea,qa:review,ci,summary:proposal.summary,verification:proposal.verification,files:proposal.changes.map(x=>x.path),...pr};
           const resultJson = JSON.stringify(result);
           await step.do("product patch persist pr", async () => {
             const impactId = crypto.randomUUID();
             const statements = [
               this.env.DB.prepare(`UPDATE WORK_QUEUE SET status='completed',result_json=?,error_text=NULL,completed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(resultJson,jobId),
               this.env.DB.prepare(`UPDATE RUNS SET status='completed',result_json=?,completed_at=CURRENT_TIMESTAMP WHERE id=?`).bind(resultJson,runId),
-              this.env.DB.prepare(`INSERT INTO GITHUB_OPERATIONS(id,job_id,repo_full_name,operation,branch_name,pr_number,status,data_json) VALUES (?,?,?,'CREATE_PRODUCT_DRAFT_PR',?,?,'waiting-human',?)`).bind(crypto.randomUUID(),jobId,pr.repo,pr.branch,pr.prNumber,JSON.stringify(pr)),
-              this.env.DB.prepare(`INSERT INTO PROJECT_IMPACT(id,roadmap_id,job_id,impact_area,repo_full_name,branch_name,pr_number,pr_url,status,summary,files_json,qa_score) VALUES (?,?,?,?,?,?,?,?, 'waiting-human',?,?,?)`).bind(impactId,roadmapId,jobId,impactArea,pr.repo,pr.branch,pr.prNumber,pr.prUrl,proposal.summary,JSON.stringify(proposal.changes.map(x=>x.path)),review.score),
-              this.env.DB.prepare(`INSERT INTO RUN_EVENTS(run_id,event_type,message,data_json) VALUES (?,'product_draft_pr_created',?,?)`).bind(runId,`Product Draft PR #${pr.prNumber} created; waiting for human/CI merge gate`,JSON.stringify(pr))
+              this.env.DB.prepare(`INSERT INTO GITHUB_OPERATIONS(id,job_id,repo_full_name,operation,branch_name,pr_number,status,data_json) VALUES (?,?,?,'CREATE_PRODUCT_DRAFT_PR',?,?,?,?)`).bind(crypto.randomUUID(),jobId,pr.repo,pr.branch,pr.prNumber,productStatus,JSON.stringify({...pr,ci})),
+              this.env.DB.prepare(`INSERT INTO PROJECT_IMPACT(id,roadmap_id,job_id,impact_area,repo_full_name,branch_name,pr_number,pr_url,status,summary,files_json,qa_score) VALUES (?,?,?,?,?,?,?,?, ?,?,?,?)`).bind(impactId,roadmapId,jobId,impactArea,pr.repo,pr.branch,pr.prNumber,pr.prUrl,productStatus,proposal.summary,JSON.stringify(proposal.changes.map(x=>x.path)),review.score),
+              this.env.DB.prepare(`INSERT INTO RUN_EVENTS(run_id,event_type,message,data_json) VALUES (?,'product_draft_pr_created',?,?)`).bind(runId,`Product Draft PR #${pr.prNumber} created; ${productStatus === 'waiting-human' ? 'real CI passed, waiting human merge' : 'AI QA passed, real CI pending'}`,JSON.stringify({...pr,ci}))
             ];
-            if (roadmapId) statements.push(this.env.DB.prepare(`UPDATE FACTORY_ROADMAP SET status='waiting-human',result_summary=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(`Draft PR #${pr.prNumber} waiting merge: ${proposal.summary}`.slice(0,1000),roadmapId));
+            if (roadmapId) statements.push(this.env.DB.prepare(`UPDATE FACTORY_ROADMAP SET status=?,result_summary=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(productStatus,`${productStatus === 'waiting-human' ? 'Real CI passed; human merge approval waiting' : 'AI QA passed; real GitHub CI waiting'} for Draft PR #${pr.prNumber}: ${proposal.summary}`.slice(0,1000),roadmapId));
             await this.env.DB.batch(statements);
           });
-          await notifyBestEffort(this.env,`🧑‍💻 Zihin Factory ürün PR hazır\n${impactArea}\nQA: ${review.score}/100\n${pr.prUrl}\nMerge edilene kadar sonraki bağımlı patch bekleyecek.`);
-          await wakeGovernor(this.env,"product-pr-waiting-human");
+          await notifyBestEffort(this.env,ci.state === "success"
+            ? `🟢 Zihin Factory gerçek CI geçti; insan merge onayı bekleniyor\n${impactArea}\nAI QA: ${review.score}/100\n${pr.prUrl}`
+            : `🟡 Zihin Factory Draft PR oluşturuldu; gerçek CI doğrulaması bekleniyor\n${impactArea}\nAI QA: ${review.score}/100 (final başarı değildir)\n${pr.prUrl}`);
+          await wakeGovernor(this.env,productStatus === "waiting-human" ? "product-pr-waiting-human" : "product-pr-waiting-ci");
           return {jobId,runId,result};
         }
 
