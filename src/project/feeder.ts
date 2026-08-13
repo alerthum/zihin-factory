@@ -17,6 +17,9 @@ export type ProjectFeederResult = {
   ciQuarantined: number;
   action: string;
   promoted?: number;
+  openProductPrs?: number;
+  codePrCapacity?: number;
+  throughputHealth?: "active" | "review-backlog" | "stalled" | "idle";
 };
 
 type SeedItem = {
@@ -179,6 +182,10 @@ const DIRECTOR_TARGETS: Record<DirectorStream,number> = {
   code: 1
 };
 
+// Human merge remains mandatory, but one approved Draft PR must not freeze the entire
+// production lane. Keep a small bounded review backlog while continuing to produce.
+export const MAX_OPEN_PRODUCT_DRAFT_PRS = 3;
+
 const DIRECTOR_STREAM_ROLES: Record<DirectorStream,string[]> = {
   research:["Structure Miner","Research Scout","Source Auditor","Curriculum Mapper"],
   content:["Factory Designer","Distractor Engineer","Tutor Designer","Game Planner"],
@@ -281,7 +288,65 @@ async function executableBacklogForRoles(db: D1Database, roles: string[]): Promi
 }
 
 async function executableBacklogForStream(db: D1Database, stream: DirectorStream): Promise<number> {
-  return executableBacklogForRoles(db,DIRECTOR_STREAM_ROLES[stream]);
+  if (stream !== "code") return executableBacklogForRoles(db,DIRECTOR_STREAM_ROLES[stream]);
+
+  // waiting-ci / waiting-human are review states, not executable code-lane work.
+  // Counting them as code backlog caused a single Draft PR to freeze production forever.
+  const roles=DIRECTOR_STREAM_ROLES[stream];
+  const placeholders=roles.map(()=>"?").join(",");
+  const rows=await db.prepare(
+    `SELECT status,depends_on_json FROM FACTORY_ROADMAP
+     WHERE agent_role IN (${placeholders}) AND status IN ('ready','dispatched')
+     ORDER BY updated_at DESC LIMIT 120`
+  ).bind(...roles).all<{status:string;depends_on_json:string}>();
+  let count=0;
+  for (const row of rows.results) {
+    if (row.status === "dispatched") { count++; continue; }
+    if (await dependencyStatus(db,row.depends_on_json)) count++;
+  }
+  return count;
+}
+
+async function openProductPrCount(db:D1Database):Promise<number>{
+  const row=await db.prepare(
+    `SELECT COUNT(*) AS count FROM PROJECT_IMPACT
+     WHERE status IN ('waiting-ci','waiting-human') AND pr_number IS NOT NULL`
+  ).first<{count:number}>();
+  return Number(row?.count??0);
+}
+
+async function throughputWatchdog(db:D1Database,input:{openProductPrs:number;promoted:number;directorSeeded:number}):Promise<"active"|"review-backlog"|"stalled"|"idle">{
+  const continuous=(await stateValue(db,"continuous_enabled")) === "1";
+  const codeBacklog=await executableBacklogForStream(db,"code");
+  const lastImpact=await db.prepare(
+    `SELECT MAX(created_at) AS created_at FROM PROJECT_IMPACT WHERE pr_number IS NOT NULL`
+  ).first<{created_at:string|null}>();
+  const lastMs=lastImpact?.created_at ? Date.parse(lastImpact.created_at.replace(" ","T")+"Z") : 0;
+  const idleMinutes=lastMs ? Math.max(0,Math.floor((Date.now()-lastMs)/60000)) : 999999;
+  const capacity=Math.max(0,MAX_OPEN_PRODUCT_DRAFT_PRS-input.openProductPrs);
+
+  let health:"active"|"review-backlog"|"stalled"|"idle"="idle";
+  if (input.promoted>0 || input.directorSeeded>0 || codeBacklog>0) health="active";
+  else if (capacity===0) health="review-backlog";
+  else if (continuous && idleMinutes>=90) health="stalled";
+
+  await setState(db,"product_throughput_health",health);
+  await setState(db,"product_open_prs",String(input.openProductPrs));
+  await setState(db,"product_pr_capacity",String(capacity));
+  await setState(db,"product_last_pr_idle_minutes",String(idleMinutes));
+
+  if (health === "stalled") {
+    const last=(await stateValue(db,"throughput_stall_last_recorded_at")) ?? "";
+    const lastRecorded=Date.parse(last);
+    if (!Number.isFinite(lastRecorded) || Date.now()-lastRecorded >= 60*60_000) {
+      const detail=`throughput_stall_review_backlog: continuous factory produced no new product PR for ${idleMinutes} minutes while review capacity=${capacity}, codeBacklog=${codeBacklog}, openProductPrs=${input.openProductPrs}`;
+      await recordOperationalLearning(db,{producerRole:"Project Director",defectCode:"throughput_stall_review_backlog",detail});
+      await db.prepare(`INSERT INTO PROJECT_FEED_LOG(action,roadmap_id,detail_json) VALUES ('THROUGHPUT_STALL',NULL,?)`)
+        .bind(JSON.stringify({idleMinutes,capacity,codeBacklog,openProductPrs:input.openProductPrs})).run();
+      await setState(db,"throughput_stall_last_recorded_at",new Date().toISOString());
+    }
+  }
+  return health;
 }
 
 async function nextDirectorCursor(db: D1Database, stream: DirectorStream): Promise<number> {
@@ -293,14 +358,15 @@ async function nextDirectorCursor(db: D1Database, stream: DirectorStream): Promi
 }
 
 async function seedDirectorBacklog(db: D1Database): Promise<number> {
-  const waitingHuman=await db.prepare(`SELECT COUNT(*) AS count FROM PROJECT_IMPACT WHERE status IN ('waiting-ci','waiting-human')`).first<{count:number}>();
+  const openProductPrs=await openProductPrCount(db);
+  const codeCapacity=Math.max(0,MAX_OPEN_PRODUCT_DRAFT_PRS-openProductPrs);
   let inserted=0;
   const streams: DirectorStream[]=["research","content","qa","release","code"];
   for (const stream of streams) {
     const programs=DIRECTOR_PROGRAMS.filter(x=>x.stream===stream);
     if (!programs.length) continue;
     let target=DIRECTOR_TARGETS[stream];
-    if (stream === "code" && Number(waitingHuman?.count ?? 0) > 0) target=0;
+    if (stream === "code") target=Math.min(target,codeCapacity);
     let backlog=await executableBacklogForStream(db,stream);
     while (backlog < target) {
       const cursor=await nextDirectorCursor(db,stream);
@@ -330,8 +396,8 @@ async function seedDirectorBacklog(db: D1Database): Promise<number> {
 }
 
 async function promotePassedReconToCode(db: D1Database): Promise<number> {
-  const waitingHuman=await db.prepare(`SELECT COUNT(*) AS count FROM PROJECT_IMPACT WHERE status IN ('waiting-ci','waiting-human')`).first<{count:number}>();
-  if (Number(waitingHuman?.count ?? 0) > 0) return 0;
+  const openProductPrs=await openProductPrCount(db);
+  if (openProductPrs >= MAX_OPEN_PRODUCT_DRAFT_PRS) return 0;
   if ((await executableBacklogForStream(db,"code")) >= 1) return 0;
 
   const rows=await db.prepare(
@@ -490,14 +556,20 @@ export async function projectFeederCycle(env: ProjectFeederEnv): Promise<Project
   if (!enabled) return {enabled:false,seeded:0,merged:0,closedUnmerged:0,waitingHuman:0,waitingCi:0,ciRetried:0,ciQuarantined:0,action:"paused"};
 
   const baselineSeeded = await seedProjectRoadmap(env.DB);
-  const promoted = await promotePassedReconToCode(env.DB);
-  const directorSeeded = await seedDirectorBacklog(env.DB);
-  const seeded = baselineSeeded + promoted + directorSeeded;
+
+  // Reconcile first so merged/closed/failed PRs release capacity before backlog decisions.
   const reconciled = String(env.GITHUB_TOKEN ?? "").trim()
     ? await reconcileProductPullRequests(env)
     : {merged:0,closedUnmerged:0,waitingHuman:0,waitingCi:0,ciRetried:0,ciQuarantined:0};
-  const action = seeded > 0 ? "seeded" : reconciled.ciRetried > 0 ? "ci-retry" : reconciled.ciQuarantined > 0 ? "ci-quarantine" : reconciled.merged > 0 ? "pr-merged" : reconciled.closedUnmerged > 0 ? "pr-closed" : reconciled.waitingCi > 0 ? "waiting-ci" : reconciled.waitingHuman > 0 ? "waiting-human" : "steady";
+
+  const promoted = await promotePassedReconToCode(env.DB);
+  const directorSeeded = await seedDirectorBacklog(env.DB);
+  const seeded = baselineSeeded + promoted + directorSeeded;
+  const openProductPrs=await openProductPrCount(env.DB);
+  const codePrCapacity=Math.max(0,MAX_OPEN_PRODUCT_DRAFT_PRS-openProductPrs);
+  const throughputHealth=await throughputWatchdog(env.DB,{openProductPrs,promoted,directorSeeded});
+  const action = seeded > 0 ? "seeded" : reconciled.ciRetried > 0 ? "ci-retry" : reconciled.ciQuarantined > 0 ? "ci-quarantine" : reconciled.merged > 0 ? "pr-merged" : reconciled.closedUnmerged > 0 ? "pr-closed" : throughputHealth === "stalled" ? "throughput-stalled" : reconciled.waitingCi > 0 ? "waiting-ci" : reconciled.waitingHuman > 0 ? "waiting-human" : "steady";
   await setState(env.DB,"last_project_feeder_action",action);
   await setState(env.DB,"last_project_feeder_at",new Date().toISOString());
-  return {enabled:true,seeded,promoted,...reconciled,action};
+  return {enabled:true,seeded,promoted,...reconciled,action,openProductPrs,codePrCapacity,throughputHealth};
 }

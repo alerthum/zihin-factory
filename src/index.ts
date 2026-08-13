@@ -284,7 +284,7 @@ async function factorySnapshot(db: D1Database) {
   }));
 
   return {
-    version:metaMap.factory_version ?? "0.8.0",
+    version:metaMap.factory_version ?? "0.9.0",
     state:state.results,stateMap,
     queue:queue.results,roadmap:roadmapView,eligibleRoadmap,blockedReadyRoadmap,recentReviews:recentReviews.results,blockers:blockers.results,
     activeJobs,startingJobs,recentEvents:recentEvents.results,repos:repos.results,githubOperations:githubOperations.results,

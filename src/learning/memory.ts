@@ -9,6 +9,7 @@ const LESSON_TEXT: Record<string,string> = {
   missing_dependency: "Test veya kodun kullandığı bağımlılığın package manifest/lock içinde gerçekten bulunduğunu doğrula; yerel node_modules varlığına güvenme.",
   test_only_production_patch: "Gerçek ürün davranışı isteyen görevde yalnız test dosyalarını değiştirerek problemi çözülmüş sayma; production implementasyonuna dokunan gerçek patch üret veya blocker bildir.",
   workflow_manifest_drift: "CI workflow komutları ile package.json scriptleri arasında drift olup olmadığını deterministic olarak kontrol et.",
+  throughput_stall_review_backlog: "İnsan merge kapısını koru ama tek bir waiting-human Draft PR nedeniyle üretim kod hattını sıfırlama. Sınırlı açık PR bütçesi içinde yeni doğrulanmış production patch üretmeye devam et; uzun sessizliği throughput stall olarak kaydet ve kendi kendine teşhis et.",
   acceptance_coverage: "Her kabul kriterini ayrı ayrı somut kanıt, uygulanabilir değişiklik veya test ile karşıla; genel ifadelerle geçme.",
   verification_not_executable: "Verification bölümünde gerçek repo komutu, deterministic kontrol veya ölçülebilir PASS koşulu ver; 'kontrol edilmeli' gibi soyut cümle kullanma.",
   implementation_not_concrete: "Implementation Details bölümünde gerçek sözleşme, dosya/alan, veri akışı, invariant veya test hedefi ver; danışmanlık dili kullanma.",
@@ -30,6 +31,7 @@ export function defectCode(detail: string): string {
   if (/missing_dependency/.test(s)) return "missing_dependency";
   if (/test_only_production_patch/.test(s)) return "test_only_production_patch";
   if (/workflow_manifest_drift/.test(s)) return "workflow_manifest_drift";
+  if (/throughput_stall|review backlog|waiting-human.*freeze|production lane.*freeze/.test(s)) return "throughput_stall_review_backlog";
   if (/acceptance|kabul kriter|criterion|criteria/.test(s) && /(missing|weak|not.*met|yeter|karşılan|coverage|explicit)/.test(s)) return "acceptance_coverage";
   if (/verification|doğrulama/.test(s) && /(missing|vague|weak|command|executable|belirsiz|somut)/.test(s)) return "verification_not_executable";
   if (/implementation|uygulama|implementation-ready|detail/.test(s) && /(missing|weak|vague|not.*clear|belirsiz|insufficient|yetersiz)/.test(s)) return "implementation_not_concrete";
