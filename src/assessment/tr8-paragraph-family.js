@@ -275,10 +275,16 @@ export function generatorPrompt({
 }
 
 export function reviewerPrompt({ family = TR8_MAIN_IDEA_FAMILY_V1, canonical, deterministicIssues = [] } = {}) {
-  return `Independently review this 8th-grade Turkish item. Polished prose is not evidence of quality. Check unique answer defensibility, multi-evidence synthesis, diagnostic distractors, natural Turkish, answer leakage and originality. Never provide hidden chain-of-thought. Return strict JSON only.\n\nFAMILY:\n${JSON.stringify(family)}\n\nDETERMINISTIC ISSUES:\n${JSON.stringify(deterministicIssues)}\n\nITEM:\n${JSON.stringify(canonical)}\n\nSCHEMA:\n{"decision":"PASS|RETRY|QUARANTINE","score":0,"dimensions":{"benchmarkFit":0,"reasoningQuality":0,"distractorQuality":0,"languageNaturalness":0,"answerDefensibility":0,"originality":0},"reasons":["specific reason"],"revisionInstructions":"specific changes"}`;
+  return `Independently review this 8th-grade Turkish item. Polished prose is not evidence of quality. Check unique answer defensibility, multi-evidence synthesis, diagnostic distractors, natural Turkish, answer leakage and originality. Never provide hidden chain-of-thought. Return strict JSON only.\n\nFAMILY:\n${JSON.stringify(family)}\n\nDETERMINISTIC ISSUES:\n${JSON.stringify(deterministicIssues)}\n\nITEM:\n${JSON.stringify(canonical)}\n\nSCHEMA:\n{"selectedOptionIndex":0,"supportingEvidenceIds":["E1","E2","E3"],"decision":"PASS|RETRY|QUARANTINE","score":0,"dimensions":{"benchmarkFit":0,"reasoningQuality":0,"distractorQuality":0,"languageNaturalness":0,"answerDefensibility":0,"originality":0},"reasons":["specific reason"],"revisionInstructions":"specific changes"}`;
 }
 
-export function parseEngineeringReview(raw, { producerModel, reviewerModel, deterministicIssues = [] } = {}) {
+export function parseEngineeringReview(raw, {
+  producerModel,
+  reviewerModel,
+  deterministicIssues = [],
+  expectedCorrectIndex,
+  requiredEvidenceIds = []
+} = {}) {
   let parsed;
   try {
     parsed = JSON.parse(balancedObject(raw) ?? stripFences(raw));
@@ -296,7 +302,13 @@ export function parseEngineeringReview(raw, { producerModel, reviewerModel, dete
   };
   const requestedDecision = String(parsed.decision || "RETRY").toUpperCase();
   const independentModel = Boolean(producerModel && reviewerModel && producerModel !== reviewerModel);
+  const selectedOptionIndex = Number(parsed.selectedOptionIndex);
+  const reviewerEvidenceIds = Array.isArray(parsed.supportingEvidenceIds) ? parsed.supportingEvidenceIds.map(String) : [];
+  const independentlyResolved = Number.isInteger(expectedCorrectIndex)
+    && selectedOptionIndex === expectedCorrectIndex
+    && requiredEvidenceIds.every((id) => reviewerEvidenceIds.includes(String(id)));
   const hardPass = independentModel
+    && independentlyResolved
     && deterministicIssues.length === 0
     && score(parsed.score) >= 85
     && dimensions.benchmarkFit >= 80
@@ -312,6 +324,7 @@ export function parseEngineeringReview(raw, { producerModel, reviewerModel, dete
       : "RETRY";
   const reasons = Array.isArray(parsed.reasons) ? parsed.reasons.map(String).slice(0, 8) : [];
   if (!independentModel) reasons.push("producer-reviewer-model-must-differ");
+  if (!independentlyResolved) reasons.push("independent-answer-or-evidence-mismatch");
   if (requestedDecision === "PASS" && !hardPass) reasons.push("hard-engineering-threshold-not-met");
   return Object.freeze({
     decision,
@@ -321,6 +334,9 @@ export function parseEngineeringReview(raw, { producerModel, reviewerModel, dete
     revisionInstructions: String(parsed.revisionInstructions || "").trim(),
     producerModel: String(producerModel || ""),
     reviewerModel: String(reviewerModel || ""),
+    selectedOptionIndex: Number.isInteger(selectedOptionIndex) ? selectedOptionIndex : null,
+    supportingEvidenceIds: Object.freeze(reviewerEvidenceIds),
+    independentlyResolved,
     deterministicIssues: Object.freeze([...deterministicIssues])
   });
 }

@@ -96,6 +96,8 @@ test("producer instructions preserve the family and prohibit copying and hidden 
 
 test("engineering reviewer is independent and cannot override deterministic failures", () => {
   const passingReview = JSON.stringify({
+    selectedOptionIndex: 0,
+    supportingEvidenceIds: ["E2", "E3", "E4"],
     decision: "PASS",
     score: 93,
     dimensions: {
@@ -109,16 +111,19 @@ test("engineering reviewer is independent and cannot override deterministic fail
     reasons: ["All evidence gates pass"],
     revisionInstructions: ""
   });
-  const sameModel = parseEngineeringReview(passingReview, { producerModel: "model-a", reviewerModel: "model-a" });
+  const reviewContext = { expectedCorrectIndex: 0, requiredEvidenceIds: ["E2", "E3", "E4"] };
+  const sameModel = parseEngineeringReview(passingReview, { producerModel: "model-a", reviewerModel: "model-a", ...reviewContext });
   assert.equal(sameModel.decision, "RETRY");
   const deterministicFailure = parseEngineeringReview(passingReview, {
     producerModel: "model-a",
     reviewerModel: "model-b",
-    deterministicIssues: ["duplicate-options"]
+    deterministicIssues: ["duplicate-options"],
+    ...reviewContext
   });
   assert.equal(deterministicFailure.decision, "RETRY");
-  const independentPass = parseEngineeringReview(passingReview, { producerModel: "model-a", reviewerModel: "model-b" });
+  const independentPass = parseEngineeringReview(passingReview, { producerModel: "model-a", reviewerModel: "model-b", ...reviewContext });
   assert.equal(independentPass.decision, "PASS");
+  assert.equal(independentPass.independentlyResolved, true);
 });
 
 test("review prompt treats prose quality as insufficient evidence", () => {
