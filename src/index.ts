@@ -356,7 +356,7 @@ async function factorySnapshot(db: D1Database) {
   }));
 
   return {
-    version:metaMap.factory_version ?? "0.9.0",
+    version:metaMap.factory_version ?? "0.10.1",
     state:state.results,stateMap,
     queue:queue.results,roadmap:roadmapView,eligibleRoadmap,blockedReadyRoadmap,recentReviews:recentReviews.results,blockers:blockers.results,
     activeJobs,startingJobs,recentEvents:recentEvents.results,repos:repos.results,githubOperations:githubOperations.results,
@@ -613,6 +613,7 @@ export default {
         "GET /jobs/:id (Bearer token)",
         "POST /jobs (Bearer token)",
         "GET /admin/tr8-benchmark/:jobId/reviews (Bearer token)",
+        "GET /admin/tr8-benchmark/:jobId/approved-package (Bearer token)",
         "POST /admin/tr8-benchmark/review (Bearer token)",
         "POST /admin/seed-roadmap (Bearer token)",
         "POST /admin/start (Bearer token)",

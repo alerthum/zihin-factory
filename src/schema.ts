@@ -49,7 +49,7 @@ export async function ensureSchema(db: D1Database): Promise<void> {
   if (Date.now() < schemaReadyUntil) return;
   for (const sql of SCHEMA_STATEMENTS) await db.prepare(sql).run();
 
-  for (const [key,value] of [["schema_version","11"],["factory_version","0.9.0"]]) {
+  for (const [key,value] of [["schema_version","12"],["factory_version","0.10.1"]]) {
     await db.prepare(
       `INSERT INTO FACTORY_META(key,value,updated_at) VALUES (?,?,CURRENT_TIMESTAMP)
        ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP`
