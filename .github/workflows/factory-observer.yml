@@ -92,6 +92,19 @@ jobs:
 
             Bu kayıt, salt okunur Observer tarafından üç saatte bir yenilenir. Normal kontrolde yalnız bu sayfaya bakmanız yeterlidir.
 
+            ## Günlük izlenecek üç kayıt
+
+            1. [Observer zamanlaması — Factory PR #4](https://github.com/${owner}/${repo}/pull/4)
+            2. [Tek fabrika teslimat adayı — Factory PR #12](https://github.com/${owner}/${repo}/pull/12)
+            3. [Tek oyun entegrasyon adayı — KuzenlerYarisiyor PR #2](https://github.com/alerthum/KuzenlerYarisiyor/pull/2)
+
+            Aşağıdaki diğer taslaklar teknik inceleme ve kanıt katmanıdır; günlük olarak takip edilmeleri gerekmez.
+
+            ## Merge öncesi production koruması
+
+            > [!CAUTION]
+            > Cloudflare production branch `production/cloudflare` ve Vercel Production Branch Tracking `production/vercel` olarak doğrulanmadan hiçbir PR `main` dalına alınmamalıdır. Cloudflare Build watch Exclude paths alanında ayrıca `.github/*` ve `tests/*` bulunmalıdır.
+
             ## Hızlı bağlantılar
 
             - [Canlı fabrika paneli](https://zihin-factory-governor.alerthum.workers.dev/dashboard) — yalnız ayrıntılı teşhis için

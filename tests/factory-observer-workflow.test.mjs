@@ -19,6 +19,17 @@ test("control issue keeps active draft PRs and the latest bounded smoke result",
   assert.match(workflow, /## Son 8\. sınıf Türkçe smoke sonucu/);
 });
 
+test("control issue remains the single operator page after every refresh", () => {
+  assert.match(workflow, /Günlük izlenecek üç kayıt/);
+  assert.match(workflow, /Factory PR #4/);
+  assert.match(workflow, /Factory PR #12/);
+  assert.match(workflow, /KuzenlerYarisiyor PR #2/);
+  assert.match(workflow, /production\/cloudflare/);
+  assert.match(workflow, /production\/vercel/);
+  assert.match(workflow, /\.github\/\*/);
+  assert.match(workflow, /tests\/\*/);
+});
+
 test("scheduled observer remains read-only toward the factory and deployment", () => {
   assert.doesNotMatch(workflow, /run:\s*(?:npx\s+)?wrangler\s+deploy/i);
   assert.doesNotMatch(workflow, /fetch\([^)]*\/jobs|\/admin\/start|\/admin\/cycle/);
