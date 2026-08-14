@@ -35,6 +35,8 @@ export const SCHEMA_STATEMENTS = [
 `CREATE TABLE IF NOT EXISTS PROVIDER_MODEL_STATS (purpose TEXT NOT NULL,model TEXT NOT NULL,successes INTEGER NOT NULL DEFAULT 0,failures INTEGER NOT NULL DEFAULT 0,timeout_failures INTEGER NOT NULL DEFAULT 0,empty_failures INTEGER NOT NULL DEFAULT 0,consecutive_failures INTEGER NOT NULL DEFAULT 0,total_latency_ms INTEGER NOT NULL DEFAULT 0,last_success_at TEXT,last_failure_at TEXT,last_error TEXT,cooldown_until TEXT,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(purpose,model))`,
 `CREATE INDEX IF NOT EXISTS IX_PROVIDER_MODEL_STATS_ROUTE ON PROVIDER_MODEL_STATS(purpose,cooldown_until,successes DESC,failures ASC)`,
 `CREATE TABLE IF NOT EXISTS NOTIFICATION_STATE (notification_key TEXT PRIMARY KEY,last_sent_at TEXT,suppressed_count INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
+`CREATE TABLE IF NOT EXISTS TR8_HUMAN_REVIEWS (review_id TEXT PRIMARY KEY,job_id TEXT NOT NULL,batch_id TEXT NOT NULL,question_id TEXT NOT NULL,reviewer_anon_id TEXT NOT NULL,reviewer_role TEXT NOT NULL,decision TEXT NOT NULL CHECK(decision IN ('APPROVE','REVISE','REJECT')),correctness INTEGER NOT NULL CHECK(correctness BETWEEN 1 AND 5),option_or_rubric_quality INTEGER NOT NULL CHECK(option_or_rubric_quality BETWEEN 1 AND 5),age_language_fit INTEGER NOT NULL CHECK(age_language_fit BETWEEN 1 AND 5),hint_non_leakage INTEGER NOT NULL CHECK(hint_non_leakage BETWEEN 1 AND 5),feedback_teaching_value INTEGER NOT NULL CHECK(feedback_teaching_value BETWEEN 1 AND 5),naturalness INTEGER NOT NULL CHECK(naturalness BETWEEN 1 AND 5),critical_blockers_json TEXT NOT NULL DEFAULT '[]',notes TEXT NOT NULL DEFAULT '',reviewed_at TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,UNIQUE(job_id,question_id,reviewer_anon_id))`,
+`CREATE INDEX IF NOT EXISTS IX_TR8_HUMAN_REVIEWS_JOB_QUESTION ON TR8_HUMAN_REVIEWS(job_id,question_id,created_at)`,
 ] as const;
 
 const AGENT_ROLES = [
@@ -47,7 +49,7 @@ export async function ensureSchema(db: D1Database): Promise<void> {
   if (Date.now() < schemaReadyUntil) return;
   for (const sql of SCHEMA_STATEMENTS) await db.prepare(sql).run();
 
-  for (const [key,value] of [["schema_version","10"],["factory_version","0.9.0"]]) {
+  for (const [key,value] of [["schema_version","11"],["factory_version","0.9.0"]]) {
     await db.prepare(
       `INSERT INTO FACTORY_META(key,value,updated_at) VALUES (?,?,CURRENT_TIMESTAMP)
        ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP`
