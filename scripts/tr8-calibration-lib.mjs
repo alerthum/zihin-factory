@@ -1,4 +1,4 @@
-import { validateCompletedSmoke } from "./tr8-smoke-lib.mjs";
+import { validateBlindReviewEvidence, validateCompletedSmoke } from "./tr8-smoke-lib.mjs";
 
 const JOB_TYPE = "assessment.tr8-paragraph-benchmark";
 const THEMES = Object.freeze([
@@ -54,6 +54,8 @@ export function validateCompletedCalibration(detail) {
   if (result.pilotReady !== false) errors.push("calibration-must-not-be-pilot-ready");
   if (result.humanReviewStatus !== "NOT_MEASURED") errors.push("human-review-must-be-pending");
   if (!Array.isArray(result.automatedIssues) || result.automatedIssues.length) errors.push("automated-issues-present");
+  try { validateBlindReviewEvidence(result, 20); }
+  catch (error) { errors.push(error instanceof Error ? error.message : String(error)); }
 
   const evidence = result.qualityEvidence ?? {};
   if (Number(evidence.sampleSize) !== 20) errors.push("evidence-sample-size");
@@ -154,6 +156,7 @@ export async function runTr8Calibration({
         engineeringPassCount: validated.result.engineeringPassCount,
         sampleSize: validated.result.sampleSize,
         qualityEvidence: validated.result.qualityEvidence,
+        blindReviewCount: validated.result.instances.length,
         canonicalQuestionIds: validated.canonicalQuestions.map((question) => question.id),
         nextAction: "Complete human review for all twenty questions; do not export or import automatically."
       });
@@ -174,6 +177,7 @@ export function calibrationReportMarkdown(report, { runUrl = "" } = {}) {
 - Önkoşul smoke job: \`${String(report?.smokeJobId ?? "doğrulanamadı")}\`
 - Calibration job: \`${String(report?.jobId ?? "oluşturulamadı")}\`
 - Engineering: ${Number(report?.engineeringPassCount ?? 0)} / ${Number(report?.sampleSize ?? 20)}
+- Kör bağımsız çözüm: ${Number(report?.blindReviewCount ?? 0)} / ${Number(report?.sampleSize ?? 20)}
 - Semantik tekrar oranı: ${String(evidence.duplicateRate ?? "ölçülemedi")}%
 - Yapısal kalıp tekrar çifti: ${String(evidence.structuralDuplicatePairCount ?? "ölçülemedi")}
 - Çeşitlilik: ${String(evidence.distinctDiversityPlanCount ?? "?")} plan · ${String(evidence.distinctDiscourseStructureCount ?? "?")} söylem · ${String(evidence.distinctReasoningPathCount ?? "?")} akıl yürütme · ${String(evidence.distinctGenreCount ?? "?")} tür
@@ -185,4 +189,3 @@ ${runUrl ? `- [GitHub Actions kanıtı](${runUrl})` : ""}
 ${passed ? "Sıradaki adım: Dashboard'da 20/20 insan incelemesi tamamlanır; en az 16 kabul olmadan export kapalı kalır." : `Hata: \`${String(report?.error ?? "bilinmeyen")}\``}
 `;
 }
-

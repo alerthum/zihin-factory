@@ -28,6 +28,22 @@ function canonical(index) {
   };
 }
 
+function blindInstance(index) {
+  return {
+    instanceId: `calibration-item-${index + 1}`,
+    status: "ENGINEERING_PASS",
+    producerModel: `producer-${index + 1}`,
+    blindReviewerModel: `blind-reviewer-${index + 1}`,
+    reviewerModel: `quality-reviewer-${index + 1}`,
+    engineeringDecision: "PASS",
+    engineeringScore: 93,
+    blindResolutionLocked: true,
+    independentlyResolved: true,
+    blindAnswerKeyExposed: false,
+    error: null
+  };
+}
+
 function detail({ sampleSize, engineeringPassCount = sampleSize, structuralDuplicatePairCount = 0 } = {}) {
   const calibration = sampleSize === 20;
   const result = {
@@ -40,6 +56,7 @@ function detail({ sampleSize, engineeringPassCount = sampleSize, structuralDupli
     automatedIssues: [],
     humanReviewStatus: "NOT_MEASURED",
     pilotReady: false,
+    instances: Array.from({ length: sampleSize }, (_, index) => blindInstance(index)),
     qualityEvidence: calibration ? {
       sampleSize: 20,
       duplicateRate: 0,
@@ -99,8 +116,23 @@ test("calibration requires a successful smoke and starts exactly twenty planned 
   assert.equal(request.payload.maxAttempts, 2);
   assert.equal(request.payload.themes.length, 20);
   assert.equal(report.status, "PASS");
+  assert.equal(report.blindReviewCount, 20);
   assert.equal(report.canonicalQuestionIds.length, 20);
   assert.doesNotMatch(JSON.stringify(report), /secret/);
+});
+
+test("calibration fails closed when any blind solution is missing or answer-exposed", () => {
+  const missing = detail({ sampleSize: 20 });
+  const missingResult = JSON.parse(missing.job.result_json);
+  missingResult.instances.pop();
+  missing.job.result_json = JSON.stringify(missingResult);
+  assert.throws(() => validateCompletedCalibration(missing), /blind-instance-count/);
+
+  const exposed = detail({ sampleSize: 20 });
+  const exposedResult = JSON.parse(exposed.job.result_json);
+  exposedResult.instances[7].blindAnswerKeyExposed = true;
+  exposed.job.result_json = JSON.stringify(exposedResult);
+  assert.throws(() => validateCompletedCalibration(exposed), /blind-answer-key-exposed/);
 });
 
 test("failed smoke evidence prevents creation of a calibration job", async () => {
@@ -134,9 +166,11 @@ test("calibration report explicitly leaves human review and export manual", () =
     jobId: "calibration-1",
     engineeringPassCount: 20,
     sampleSize: 20,
+    blindReviewCount: 20,
     qualityEvidence: { structuralDuplicatePairCount: 0, distinctDiversityPlanCount: 20 }
   });
   assert.match(markdown, /İnsan incelemesi: \*\*0\/20 — otomatik yapılmadı\*\*/);
+  assert.match(markdown, /Kör bağımsız çözüm: 20 \/ 20/);
   assert.match(markdown, /Onaylı paket exportu: \*\*otomatik yapılmadı\*\*/);
 });
 
@@ -149,4 +183,3 @@ test("calibration workflow is manual, smoke-gated and writes only to control iss
   assert.match(workflow, /issue_number: 3/);
   assert.doesNotMatch(workflow, /schedule:|wrangler deploy|git push|merge|approved-package/i);
 });
-

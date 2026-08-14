@@ -24,11 +24,28 @@ function canonical(id) {
   };
 }
 
+function blindInstance(index) {
+  return {
+    instanceId: `smoke-item-${index + 1}`,
+    status: "ENGINEERING_PASS",
+    producerModel: `producer-${index + 1}`,
+    blindReviewerModel: `blind-reviewer-${index + 1}`,
+    reviewerModel: `quality-reviewer-${index + 1}`,
+    engineeringDecision: "PASS",
+    engineeringScore: 93,
+    blindResolutionLocked: true,
+    independentlyResolved: true,
+    blindAnswerKeyExposed: false,
+    error: null
+  };
+}
+
 function completedDetail(overrides = {}) {
   const result = {
     kind: "assessment.tr8-paragraph-benchmark", batchId: "tr8-smoke-run-42", sampleSize: 2,
     status: "PENDING_HUMAN_REVIEW", engineeringPassCount: 2, automatedIssues: [],
     humanReviewStatus: "NOT_MEASURED", pilotReady: false,
+    instances: [blindInstance(0), blindInstance(1)],
     qualityEvidence: {
       sampleSize: 2, duplicateRate: 0, longestCorrectRate: 0, uniqueAnswerRate: 100, explanationEvidenceRate: 100,
       structuralDuplicatePairCount: 0, distinctDiversityPlanCount: 2, distinctDiscourseStructureCount: 2
@@ -62,8 +79,25 @@ test("cloud smoke starts exactly two questions, polls and proves canonical artif
   assert.equal(request.payload.sampleSize, 2);
   assert.equal(request.payload.maxAttempts, 2);
   assert.equal(report.status, "PASS");
+  assert.equal(report.blindReviewCount, 2);
   assert.deepEqual(report.canonicalQuestionIds, ["q1", "q2"]);
   assert.doesNotMatch(JSON.stringify(report), /secret/);
+});
+
+test("smoke rejects a reviewer record that saw the answer key", async () => {
+  const unsafe = completedDetail();
+  const result = JSON.parse(unsafe.job.result_json);
+  result.instances[0].blindAnswerKeyExposed = true;
+  unsafe.job.result_json = JSON.stringify(result);
+  const replies = [
+    response(200, { ok: true, version: "0.10.1" }),
+    response(202, { ok: true, jobId: "00000000-0000-4000-8000-000000000045" }),
+    response(200, unsafe)
+  ];
+  await assert.rejects(() => runTr8Smoke({
+    baseUrl: "https://factory.example", token: "secret", runId: "45",
+    fetchImpl: async () => replies.shift(), sleep: async () => {}, maxPolls: 1
+  }), /blind-answer-key-exposed/);
 });
 
 test("engineering shortfall keeps the smoke and twenty-question calibration closed", async () => {
@@ -90,9 +124,11 @@ test("old live factory version is rejected before a smoke job can be created", a
 test("smoke report tells the operator that human review and calibration remain closed", () => {
   const markdown = smokeReportMarkdown({
     ok: true, status: "PASS", jobId: "job-1", engineeringPassCount: 2, sampleSize: 2,
+    blindReviewCount: 2,
     qualityEvidence: { duplicateRate: 0, longestCorrectRate: 0, explanationEvidenceRate: 100 }
   });
   assert.match(markdown, /İnsan incelemesi: \*\*henüz yapılmadı\*\*/);
+  assert.match(markdown, /Kör bağımsız çözüm: 2 \/ 2/);
   assert.match(markdown, /20 soruluk calibration: \*\*otomatik başlatılmadı\*\*/);
 });
 

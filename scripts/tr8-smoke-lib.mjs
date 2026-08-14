@@ -19,6 +19,29 @@ function parseJson(value, field) {
   catch { throw new Error(`${field}:invalid-json`); }
 }
 
+export function validateBlindReviewEvidence(result, expectedCount) {
+  const errors = [];
+  const instances = Array.isArray(result?.instances) ? result.instances : [];
+  if (instances.length !== expectedCount) errors.push(`blind-instance-count:${instances.length}/${expectedCount}`);
+  const instanceIds = instances.map((instance) => String(instance?.instanceId ?? "").trim());
+  if (instanceIds.some((id) => !id) || new Set(instanceIds).size !== instances.length) errors.push("blind-instance-ids");
+  for (const instance of instances) {
+    const id = String(instance?.instanceId ?? "unknown");
+    const producerModel = String(instance?.producerModel ?? "").trim();
+    const blindReviewerModel = String(instance?.blindReviewerModel ?? "").trim();
+    const qualityReviewerModel = String(instance?.reviewerModel ?? "").trim();
+    if (instance?.status !== "ENGINEERING_PASS") errors.push(`blind-instance-status:${id}`);
+    if (!producerModel || !blindReviewerModel || producerModel === blindReviewerModel) errors.push(`blind-model-independence:${id}`);
+    if (!producerModel || !qualityReviewerModel || producerModel === qualityReviewerModel) errors.push(`quality-model-independence:${id}`);
+    if (instance?.engineeringDecision !== "PASS") errors.push(`blind-engineering-decision:${id}`);
+    if (instance?.blindResolutionLocked !== true) errors.push(`blind-resolution-unlocked:${id}`);
+    if (instance?.independentlyResolved !== true) errors.push(`blind-answer-unresolved:${id}`);
+    if (instance?.blindAnswerKeyExposed !== false) errors.push(`blind-answer-key-exposed:${id}`);
+  }
+  if (errors.length) throw new Error(`tr8-blind-review-failed:${[...new Set(errors)].join(",")}`);
+  return instances;
+}
+
 export function validateCompletedSmoke(detail) {
   const result = parseJson(detail?.job?.result_json, "job.result_json");
   const errors = [];
@@ -29,6 +52,8 @@ export function validateCompletedSmoke(detail) {
   if (result.pilotReady !== false) errors.push("smoke-must-not-be-pilot-ready");
   if (result.humanReviewStatus !== "NOT_MEASURED") errors.push("human-review-must-be-pending");
   if (!Array.isArray(result.automatedIssues) || result.automatedIssues.length) errors.push("automated-issues-present");
+  try { validateBlindReviewEvidence(result, 2); }
+  catch (error) { errors.push(error instanceof Error ? error.message : String(error)); }
   const evidence = result.qualityEvidence ?? {};
   if (Number(evidence.sampleSize) !== 2) errors.push("evidence-sample-size");
   if (Number(evidence.duplicateRate) !== 0) errors.push("duplicate-rate");
@@ -115,6 +140,7 @@ export async function runTr8Smoke({
         engineeringPassCount: validated.result.engineeringPassCount,
         sampleSize: validated.result.sampleSize,
         qualityEvidence: validated.result.qualityEvidence,
+        blindReviewCount: validated.result.instances.length,
         canonicalQuestionIds: validated.canonicalQuestions.map((question) => question.id),
         nextAction: "Review the two canonical questions; do not start the 20-question calibration automatically."
       });
@@ -134,6 +160,7 @@ export function smokeReportMarkdown(report, { runUrl = "" } = {}) {
 - Sonuç: **${passed ? "PASS" : "FAIL"}**
 - Job: \`${String(report?.jobId ?? "oluşturulamadı")}\`
 - Engineering: ${Number(report?.engineeringPassCount ?? 0)} / ${Number(report?.sampleSize ?? 2)}
+- Kör bağımsız çözüm: ${Number(report?.blindReviewCount ?? 0)} / ${Number(report?.sampleSize ?? 2)}
 - Tekrar oranı: ${String(evidence.duplicateRate ?? "ölçülemedi")}%
 - En uzun doğru şık oranı: ${String(evidence.longestCorrectRate ?? "ölçülemedi")}%
 - Açıklama-kanıt oranı: ${String(evidence.explanationEvidenceRate ?? "ölçülemedi")}%

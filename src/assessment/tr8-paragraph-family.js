@@ -434,6 +434,7 @@ export function parseEngineeringReview(raw, {
   const blindResolutionLocked = Boolean(committedBlindResolution)
     && committedBlindResolution.decision === "PASS"
     && committedBlindResolution.independentModel === true
+    && committedBlindResolution.answerKeyExposed === false
     && (!Number.isInteger(qualitySelectedOptionIndex) || qualitySelectedOptionIndex === selectedOptionIndex)
     && (!qualityEvidenceIds.length || reviewerEvidenceIds.every((id) => qualityEvidenceIds.includes(id)));
   const independentlyResolved = Number.isInteger(expectedCorrectIndex)
@@ -472,6 +473,7 @@ export function parseEngineeringReview(raw, {
     selectedOptionIndex: Number.isInteger(selectedOptionIndex) ? selectedOptionIndex : null,
     supportingEvidenceIds: Object.freeze(reviewerEvidenceIds),
     blindReviewerModel: String(committedBlindResolution?.reviewerModel || ""),
+    blindAnswerKeyExposed: committedBlindResolution?.answerKeyExposed !== false,
     blindResolutionLocked,
     independentlyResolved,
     deterministicIssues: Object.freeze([...deterministicIssues])

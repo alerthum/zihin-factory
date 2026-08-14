@@ -315,6 +315,9 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
           automatedIssues:instance?.audit?.errors ?? [],
           engineeringDecision:instance?.engineeringReview?.decision ?? null,
           engineeringScore:instance?.engineeringReview?.score ?? null,
+          blindResolutionLocked:instance?.engineeringReview?.blindResolutionLocked === true,
+          independentlyResolved:instance?.engineeringReview?.independentlyResolved === true,
+          blindAnswerKeyExposed:instance?.engineeringReview?.blindAnswerKeyExposed !== false,
           error:instance?.error ?? null
         }));
         const result = {
