@@ -106,7 +106,9 @@ jobs:
 
             ## 8. sınıf Türkçe kalite zinciri
 
-            Pilot yalnız üretici ile aynı model olmayan ve cevap anahtarı, ipucu, geri bildirim veya çözümü görmemiş kör değerlendirici soruyu bağımsız çözerse ilerler. İkinci kalite değerlendirmesi bu kilitli cevabı değiştiremez. Smoke, 20 soruluk calibration, insan onaylı export ve KuzenlerYarisiyor importer'ı her soru için bu kanıtı fail-closed olarak zorunlu tutar.
+            Pilot yalnız üretici, cevap anahtarı/ipuçları/geri bildirim/çözümü görmeden soruyu çözen kör değerlendirici ve son kalite denetçisi üç farklı model olduğunda ilerler. Son kalite denetçisi kilitli kör cevabı değiştiremez. Smoke, 20 soruluk calibration, insan onaylı export ve KuzenlerYarisiyor importer'ı her soru için bu kanıtı fail-closed olarak zorunlu tutar.
+
+            İki soruluk smoke geçse bile calibration kendiliğinden açılmaz: iki sorunun ikisi de insan tarafından incelenmeli, altı kalite boyutunda en az 4/5 almalı ve APPROVE edilmelidir. Onaylı ürün adaptörü üç aşamalı ipucunun tamamını, kanıtlı çözüm adımlarını ve dört şıkkın gerekçesini öğrencinin gerçek cevap-sonrası ekranına taşır.
 
             Kod testlerinin geçmesi gerçek soru kalitesinin kanıtlandığı anlamına gelmez; gerçek smoke, calibration ve 20/20 insan incelemesi tamamlanana kadar pilot canlıya alınmaz.
 

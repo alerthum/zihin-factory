@@ -27,8 +27,11 @@ test("control issue remains the single operator page after every refresh", () =>
   assert.match(workflow, /Factory PR #12/);
   assert.match(workflow, /KuzenlerYarisiyor PR #2/);
   assert.match(workflow, /8\. sınıf Türkçe kalite zinciri/);
-  assert.match(workflow, /cevap anahtarı, ipucu, geri bildirim veya çözümü görmemiş kör değerlendirici/);
+  assert.match(workflow, /üretici, cevap anahtarı\/ipuçları\/geri bildirim\/çözümü görmeden soruyu çözen kör değerlendirici ve son kalite denetçisi üç farklı model/);
   assert.match(workflow, /Smoke, 20 soruluk calibration, insan onaylı export ve KuzenlerYarisiyor importer/);
+  assert.match(workflow, /iki sorunun ikisi de insan tarafından incelenmeli/);
+  assert.match(workflow, /altı kalite boyutunda en az 4\/5/);
+  assert.match(workflow, /üç aşamalı ipucunun tamamını, kanıtlı çözüm adımlarını ve dört şıkkın gerekçesini/);
   assert.match(workflow, /production\/cloudflare/);
   assert.match(workflow, /production\/vercel/);
   assert.match(workflow, /\.github\/\*/);
