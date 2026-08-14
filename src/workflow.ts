@@ -8,6 +8,7 @@ import { createProjectDraftPr, getPullRequestCiState, getRepo, getRepoTree, getT
 import { candidateRepoPaths, parsePathSelection, parseAndApplyPatchProposal, patchReviewArtifact, type AppliedPatch } from "./project/repo-tools";
 import { guidanceForError, guidanceTelegramText } from "./operations/guidance";
 import { applyProductDeterministicIssues, deterministicProductReview, productPatchDeterministicIssues, verificationManifestIssues } from "./quality/product-gates";
+import { runTr8Benchmark } from "./assessment/tr8-benchmark-runner.js";
 
 export type FactoryJobParams = { jobId: string };
 
@@ -254,6 +255,97 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
         await notifyBestEffort(this.env,`🟣 Zihin Factory GitHub draft PR hazır\n${pr.repo} #${pr.prNumber}\n${pr.prUrl}`);
         await wakeGovernor(this.env,"github-pr-completed");
         return { jobId,runId,result };
+      }
+
+      if (job.job_type === "assessment.tr8-paragraph-benchmark") {
+        const payload = safeJson(job.payload_json) as Record<string, unknown>;
+        const sampleSize = Math.max(1,Math.min(20,Number(payload.sampleSize ?? 2)));
+        const maxAttempts = Math.max(1,Math.min(2,Number(payload.maxAttempts ?? 2)));
+        const batchId = String(payload.batchId ?? `tr8-${jobId.slice(0,8)}`).replace(/[^a-zA-Z0-9_-]/g,"-").slice(0,80);
+        const themes = Array.isArray(payload.themes) ? payload.themes.map(String).filter(Boolean).slice(0,20) : [];
+        const morphologyNotes = Array.isArray(payload.morphologyNotes) ? payload.morphologyNotes.map(String).filter(Boolean).slice(0,12) : [];
+        const benchmarkExcerpts = Array.isArray(payload.benchmarkExcerpts) ? payload.benchmarkExcerpts.map(String).filter(Boolean).slice(0,8) : [];
+
+        await step.do("tr8 benchmark started", async () => {
+          await touchJob(this.env.DB,jobId,runId,"tr8_benchmark_started",`8. sınıf Türkçe smoke/benchmark başladı: ${sampleSize} soru`);
+        });
+        const benchmark = await runTr8Benchmark({
+          sampleSize,
+          maxAttempts,
+          batchId,
+          themes,
+          morphologyNotes,
+          benchmarkExcerpts,
+          produce: async ({itemIndex,attempt,system,prompt}: {itemIndex:number;attempt:number;system:string;prompt:string}) => {
+            const produced = await step.do(`tr8 producer ${itemIndex + 1}.${attempt}`, {retries:{limit:1,delay:"7 seconds",backoff:"exponential"}}, async () => {
+              const ai = await runFactoryAI(this.env,{
+                system,prompt,maxTokens:1200,temperature:0.18,purpose:"producer",
+                onHeartbeat:() => providerHeartbeat(this.env.DB,jobId)
+              });
+              return {model:ai.model,content:ai.content};
+            });
+            if (!produced || typeof produced !== "object" || !("model" in produced) || !("content" in produced)) {
+              throw new Error("tr8_producer_result_not_serializable");
+            }
+            return {model:String(produced.model),content:String(produced.content)};
+          },
+          review: async ({itemIndex,attempt,producerModel,prompt}: {itemIndex:number;attempt:number;producerModel:string;prompt:string}) => {
+            const reviewed = await step.do(`tr8 reviewer ${itemIndex + 1}.${attempt}`, {retries:{limit:1,delay:"7 seconds",backoff:"exponential"}}, async () => {
+              const ai = await runFactoryAI(this.env,{
+                system:"You are the independent assessment engineering reviewer. Return strict JSON only.",
+                prompt,maxTokens:900,temperature:0,purpose:"reviewer",avoidModels:[producerModel],
+                onHeartbeat:() => providerHeartbeat(this.env.DB,jobId)
+              });
+              return {model:ai.model,content:ai.content};
+            });
+            if (!reviewed || typeof reviewed !== "object" || !("model" in reviewed) || !("content" in reviewed)) {
+              throw new Error("tr8_reviewer_result_not_serializable");
+            }
+            return {model:String(reviewed.model),content:String(reviewed.content)};
+          }
+        });
+
+        const instanceSummary = benchmark.instances.map((instance: any) => ({
+          instanceId:instance?.instanceId ?? null,
+          status:instance?.status ?? "UNKNOWN",
+          attempt:instance?.attempt ?? null,
+          producerModel:instance?.producerModel ?? null,
+          reviewerModel:instance?.reviewerModel ?? null,
+          automatedIssues:instance?.audit?.errors ?? [],
+          engineeringDecision:instance?.engineeringReview?.decision ?? null,
+          engineeringScore:instance?.engineeringReview?.score ?? null,
+          error:instance?.error ?? null
+        }));
+        const result = {
+          ok:benchmark.engineeringPassCount===benchmark.sampleSize,
+          kind:benchmark.kind,
+          familyId:benchmark.familyId,
+          batchId:benchmark.batchId,
+          sampleSize:benchmark.sampleSize,
+          status:benchmark.status,
+          engineeringPassCount:benchmark.engineeringPassCount,
+          engineeringPassRate:benchmark.engineeringPassRate,
+          quarantinedCount:benchmark.quarantinedCount,
+          automatedIssues:benchmark.automatedIssues,
+          qualityEvidence:benchmark.qualityEvidence,
+          humanReviewStatus:"NOT_MEASURED",
+          pilotReady:false,
+          instances:instanceSummary
+        };
+        const resultJson = JSON.stringify(result);
+        await step.do("persist tr8 benchmark", async () => {
+          const artifactStatements = benchmark.instances.map((instance: any,index: number) => this.env.DB.prepare(
+            `INSERT INTO ARTIFACTS(id,job_id,kind,name,metadata_json) VALUES (?,?,'assessment-candidate',?,?)`
+          ).bind(crypto.randomUUID(),jobId,`${batchId} item ${index + 1}`,JSON.stringify(instance)));
+          await this.env.DB.batch([
+            ...artifactStatements,
+            this.env.DB.prepare(`UPDATE WORK_QUEUE SET status='completed',result_json=?,error_text=NULL,completed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(resultJson,jobId),
+            this.env.DB.prepare(`UPDATE RUNS SET status='completed',result_json=?,completed_at=CURRENT_TIMESTAMP WHERE id=?`).bind(resultJson,runId),
+            this.env.DB.prepare(`INSERT INTO RUN_EVENTS(run_id,event_type,message,data_json) VALUES (?,'tr8_benchmark_completed',?,?)`).bind(runId,`8. sınıf Türkçe benchmark: ${benchmark.engineeringPassCount}/${benchmark.sampleSize} engineering PASS`,JSON.stringify(result))
+          ]);
+        });
+        await wakeGovernor(this.env,"tr8-benchmark-completed");
+        return {jobId,runId,result};
       }
 
       if (job.job_type === "product.code-patch") {
