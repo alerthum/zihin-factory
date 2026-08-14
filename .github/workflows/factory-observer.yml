@@ -25,7 +25,7 @@ jobs:
       - name: Use Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
 
       - name: Run read-only observer
         env:
@@ -58,6 +58,36 @@ jobs:
             const report = fs.readFileSync(reportPath, 'utf8');
             const { owner, repo } = context.repo;
             const runUrl = `https://github.com/${owner}/${repo}/actions/runs/${context.runId}`;
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner,
+              repo,
+              state: 'open',
+              per_page: 100
+            });
+            const existing = issues.find(issue => !issue.pull_request && issue.title === title);
+            const pulls = await github.paginate(github.rest.pulls.list, {
+              owner,
+              repo,
+              state: 'open',
+              per_page: 100
+            });
+            const activeDrafts = pulls
+              .filter(pull => pull.draft)
+              .sort((left, right) => left.number - right.number)
+              .map(pull => `- [#${pull.number} — ${pull.title}](${pull.html_url}) · base: \`${pull.base.ref}\``)
+              .join('\n') || '- Açık fabrika taslak PR’ı yok.';
+            let latestSmoke = '_Henüz iki soruluk smoke sonucu yok._';
+            if (existing) {
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner,
+                repo,
+                issue_number: existing.number,
+                per_page: 100
+              });
+              const smokeComment = [...comments].reverse().find(comment =>
+                String(comment.body || '').includes('## 8. sınıf Türkçe · 2 soruluk smoke'));
+              if (smokeComment) latestSmoke = `${smokeComment.body}\n\n[Smoke yorum kaydı](${smokeComment.html_url})`;
+            }
             const controlCenter = `# Zihin Factory — Tek Kontrol Merkezi
 
             Bu kayıt, salt okunur Observer tarafından üç saatte bir yenilenir. Normal kontrolde yalnız bu sayfaya bakmanız yeterlidir.
@@ -69,6 +99,14 @@ jobs:
             - [Fabrika taslak PR'ları](https://github.com/${owner}/${repo}/pulls)
             - [Ana ürün taslak PR'ları](https://github.com/alerthum/KuzenlerYarisiyor/pulls)
 
+            ## Aktif fabrika taslakları
+
+            ${activeDrafts}
+
+            ## Son 8. sınıf Türkçe smoke sonucu
+
+            ${latestSmoke}
+
             ## Son doğrulanmış durum
 
             ${report}
@@ -77,13 +115,6 @@ jobs:
 
             Observer yalnız okur ve raporlar. Fabrikayı başlatmaz, durdurmaz, işi yeniden denemez, kodu birleştirmez ve production deploy yapmaz.
             `;
-            const issues = await github.paginate(github.rest.issues.listForRepo, {
-              owner,
-              repo,
-              state: 'open',
-              per_page: 100
-            });
-            const existing = issues.find(issue => !issue.pull_request && issue.title === title);
             if (existing) {
               await github.rest.issues.update({
                 owner,
