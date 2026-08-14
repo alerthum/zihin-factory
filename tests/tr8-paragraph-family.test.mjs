@@ -7,7 +7,8 @@ import {
   generatorSystemPrompt,
   parseEngineeringReview,
   parseGeneratedCandidate,
-  reviewerPrompt
+  reviewerPrompt,
+  tr8DiversityPlan
 } from "../src/assessment/tr8-paragraph-family.js";
 
 const stimulus = [
@@ -21,9 +22,11 @@ const stimulus = [
 ].join(" ");
 
 function candidate() {
+  const diversityPlan = tr8DiversityPlan(0);
   return {
     familyId: TR8_MAIN_IDEA_FAMILY_V1.familyId,
     instanceId: "batch01-item01",
+    diversityPlan,
     stimulus,
     stem: "Bu parçanın ana düşüncesi aşağıdakilerden hangisidir?",
     options: [
@@ -92,6 +95,17 @@ test("producer instructions preserve the family and prohibit copying and hidden 
   assert.match(system, /Never copy/i);
   assert.match(system, /chain-of-thought/i);
   assert.match(prompt, new RegExp(TR8_MAIN_IDEA_FAMILY_V1.familyId.replaceAll(".", "\\.")));
+  assert.match(prompt, /MANDATORY DIVERSITY PLAN/);
+});
+
+test("compiler rejects a producer that changes its assigned structural template or answer position", () => {
+  const changed = candidate();
+  changed.diversityPlan = tr8DiversityPlan(1);
+  assert.throws(() => compileCandidate(changed, {
+    producerModel: "producer-a",
+    proof,
+    diversityPlan: tr8DiversityPlan(0)
+  }), /diversity-plan-mismatch/);
 });
 
 test("engineering reviewer is independent and cannot override deterministic failures", () => {

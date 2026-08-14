@@ -65,6 +65,45 @@ export const TR8_MAIN_IDEA_FAMILY_V1 = Object.freeze({
   styleReferenceIds: Object.freeze(["licensed-benchmark-morphology"])
 });
 
+const DISCOURSE_STRUCTURES = Object.freeze([
+  "contrast-with-qualification",
+  "cause-evidence-with-limit",
+  "problem-attempt-revision",
+  "change-and-continuity",
+  "claim-counterexample-synthesis"
+]);
+
+const REASONING_PATHS = Object.freeze([
+  "multi-source-convergence",
+  "exception-bounded-inference",
+  "chronology-causality-separation",
+  "evidence-weighting"
+]);
+
+const GENRES = Object.freeze([
+  "cultural-essay",
+  "science-observation",
+  "reflective-critique",
+  "historical-exposition",
+  "daily-life-analysis"
+]);
+
+export const TR8_DIVERSITY_PLANS_V1 = Object.freeze(Array.from({ length: 20 }, (_, itemIndex) => Object.freeze({
+  planId: `tr8-main-idea-diversity-${String(itemIndex + 1).padStart(2, "0")}`,
+  discourseStructureId: DISCOURSE_STRUCTURES[itemIndex % DISCOURSE_STRUCTURES.length],
+  reasoningPathId: REASONING_PATHS[Math.floor(itemIndex / DISCOURSE_STRUCTURES.length)],
+  genreId: GENRES[(itemIndex * 2 + Math.floor(itemIndex / 5)) % GENRES.length],
+  correctIndex: itemIndex % 4
+})));
+
+export function tr8DiversityPlan(itemIndex) {
+  const index = Number(itemIndex);
+  if (!Number.isInteger(index) || index < 0 || index >= TR8_DIVERSITY_PLANS_V1.length) {
+    throw new Error("diversity-plan-index:must-be-0-19");
+  }
+  return TR8_DIVERSITY_PLANS_V1[index];
+}
+
 function stripFences(value) {
   return String(value ?? "").replace(/```(?:json)?/gi, "").replace(/```/g, "").trim();
 }
@@ -118,6 +157,10 @@ export function parseGeneratedCandidate(raw) {
   list(candidate.solutionSteps, "solutionSteps", 3);
   list(candidate.hints, "hints", 3);
   list(candidate.distractors, "distractors", 3);
+  text(candidate.diversityPlan?.planId, "diversityPlan.planId");
+  text(candidate.diversityPlan?.discourseStructureId, "diversityPlan.discourseStructureId");
+  text(candidate.diversityPlan?.reasoningPathId, "diversityPlan.reasoningPathId");
+  text(candidate.diversityPlan?.genreId, "diversityPlan.genreId");
   return candidate;
 }
 
@@ -125,13 +168,22 @@ export function compileCandidate(candidate, {
   family = TR8_MAIN_IDEA_FAMILY_V1,
   producerModel,
   proof = {},
-  benchmarkExcerpts = []
+  benchmarkExcerpts = [],
+  diversityPlan
 } = {}) {
   if (candidate.familyId !== family.familyId) throw new Error("family-id-mismatch");
   if (!Array.isArray(candidate.options) || candidate.options.length !== 4) throw new Error("option-count-must-be-4");
   if (!Number.isInteger(candidate.correctIndex) || candidate.correctIndex < 0 || candidate.correctIndex > 3) {
     throw new Error("correct-index-invalid");
   }
+  const expectedPlan = diversityPlan || candidate.diversityPlan;
+  if (!expectedPlan || typeof expectedPlan !== "object") throw new Error("diversity-plan-required");
+  for (const field of ["planId", "discourseStructureId", "reasoningPathId", "genreId"]) {
+    if (text(candidate.diversityPlan?.[field], `diversityPlan.${field}`) !== text(expectedPlan[field], `expectedDiversityPlan.${field}`)) {
+      throw new Error(`diversity-plan-mismatch:${field}`);
+    }
+  }
+  if (candidate.correctIndex !== Number(expectedPlan.correctIndex)) throw new Error("diversity-plan-mismatch:correctIndex");
   const optionIds = ["A", "B", "C", "D"];
   const evidenceUnits = list(candidate.evidenceUnits, "evidenceUnits", 4).map((entry, index) => ({
     id: text(entry.id || `E${index + 1}`, `evidenceUnits.${index}.id`),
@@ -224,7 +276,15 @@ export function compileCandidate(candidate, {
       independentVerifierId: text(proof.independentVerifierId || "tr8-main-idea-independent-verifier-v1", "proof.independentVerifierId"),
       verified: proof.verified === true
     },
-    styleProfile: structuredClone(candidate.styleProfile || { genre: "expository", voice: "natural-age-appropriate" }),
+    styleProfile: {
+      ...(candidate.styleProfile && typeof candidate.styleProfile === "object" ? structuredClone(candidate.styleProfile) : {}),
+      genre: text(expectedPlan.genreId, "expectedDiversityPlan.genreId"),
+      genreId: text(expectedPlan.genreId, "expectedDiversityPlan.genreId"),
+      discourseStructureId: text(expectedPlan.discourseStructureId, "expectedDiversityPlan.discourseStructureId"),
+      reasoningPathId: text(expectedPlan.reasoningPathId, "expectedDiversityPlan.reasoningPathId"),
+      diversityPlanId: text(expectedPlan.planId, "expectedDiversityPlan.planId"),
+      voice: text(candidate.styleProfile?.voice || "natural-age-appropriate", "styleProfile.voice")
+    },
     provenance: {
       generatedFromSourceIds: [...family.curriculum.sourceIds],
       styleReferenceIds: [...family.styleReferenceIds],
@@ -255,15 +315,18 @@ export function generatorPrompt({
   instanceId,
   theme = "timeless science, culture, daily life or environment",
   morphologyNotes = [],
+  diversityPlan,
   revision = ""
 } = {}) {
-  return `EXECUTABLE FAMILY:\n${JSON.stringify(family)}\n\nINSTANCE ID:\n${text(instanceId, "instanceId")}\n\nTHEME:\n${theme}\n\nBENCHMARK MORPHOLOGY NOTES (structure only):\n${morphologyNotes.map((note, index) => `${index + 1}. ${note}`).join("\n") || "- Multi-evidence synthesis; plausible diagnostic distractors."}\n\n${revision ? `REVISION:\n${revision}\n\n` : ""}Return exactly one JSON object with this shape:\n${JSON.stringify({
+  const plan = diversityPlan || tr8DiversityPlan(0);
+  return `EXECUTABLE FAMILY:\n${JSON.stringify(family)}\n\nMANDATORY DIVERSITY PLAN (do not substitute another template):\n${JSON.stringify(plan)}\n\nINSTANCE ID:\n${text(instanceId, "instanceId")}\n\nTHEME:\n${theme}\n\nBENCHMARK MORPHOLOGY NOTES (structure only):\n${morphologyNotes.map((note, index) => `${index + 1}. ${note}`).join("\n") || "- Multi-evidence synthesis; plausible diagnostic distractors."}\n\n${revision ? `REVISION:\n${revision}\n\n` : ""}Return exactly one JSON object with this shape:\n${JSON.stringify({
     familyId: family.familyId,
     instanceId: "batch01-item01",
+    diversityPlan: plan,
     stimulus: "95-155 original Turkish words",
     stem: "natural main-idea question stem",
     options: ["A text", "B text", "C text", "D text"],
-    correctIndex: 0,
+    correctIndex: plan.correctIndex,
     evidenceUnits: [{ id: "E1", text: "concise evidence unit" }],
     correctSupportEvidenceIds: ["E1", "E2", "E3"],
     correctFeedback: "why all required evidence supports the answer",

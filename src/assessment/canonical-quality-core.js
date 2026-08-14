@@ -270,6 +270,11 @@ export function auditTr8ParagraphQuestion(input, config = {}) {
   if (normalize(question.curriculum.courseId) !== "turkce") errors.push("course-must-be-turkce");
   if (question.itemFormat !== "single-choice") errors.push("item-format-must-be-single-choice");
 
+  const diversityFields = ["diversityPlanId", "discourseStructureId", "reasoningPathId", "genreId"];
+  for (const field of diversityFields) {
+    if (!String(question.styleProfile?.[field] ?? "").trim()) errors.push(`structural-diversity-missing:${field}`);
+  }
+
   const stimulusWordCount = words(question.content?.stimulus).length;
   if (stimulusWordCount < limits.stimulusWords[0] || stimulusWordCount > limits.stimulusWords[1]) {
     errors.push(`stimulus-word-count:${stimulusWordCount}`);
@@ -366,7 +371,11 @@ export function auditTr8ParagraphQuestion(input, config = {}) {
       correctLengthRatio: Number(correctLengthRatio.toFixed(2)),
       distinctDistractorMisconceptions: new Set(distractorMisconceptions).size,
       maximumHintAnswerOverlap: Number(maximumHintAnswerOverlap.toFixed(2)),
-      maximumSharedBenchmarkPhraseWords
+      maximumSharedBenchmarkPhraseWords,
+      diversityPlanId: String(question.styleProfile?.diversityPlanId ?? ""),
+      discourseStructureId: String(question.styleProfile?.discourseStructureId ?? ""),
+      reasoningPathId: String(question.styleProfile?.reasoningPathId ?? ""),
+      genreId: String(question.styleProfile?.genreId ?? "")
     })
   });
 }
@@ -395,6 +404,37 @@ export function auditTr8ParagraphBatch(inputs = [], reviews = [], config = {}) {
     }
   }
   if (semanticDuplicatePairs.length) errors.push("semantic-question-duplicates");
+
+  const diversityPlanIds = questionAudits.map((audit) => audit.metrics.diversityPlanId).filter(Boolean);
+  const discourseStructureIds = questionAudits.map((audit) => audit.metrics.discourseStructureId).filter(Boolean);
+  const reasoningPathIds = questionAudits.map((audit) => audit.metrics.reasoningPathId).filter(Boolean);
+  const genreIds = questionAudits.map((audit) => audit.metrics.genreId).filter(Boolean);
+  if (new Set(diversityPlanIds).size !== diversityPlanIds.length) errors.push("duplicate-diversity-plan");
+  const structuralFingerprints = questionAudits.map((audit) => (
+    `${audit.metrics.discourseStructureId}:${audit.metrics.reasoningPathId}`
+  ));
+  const structuralFingerprintCounts = new Map();
+  for (const fingerprint of structuralFingerprints) {
+    structuralFingerprintCounts.set(fingerprint, (structuralFingerprintCounts.get(fingerprint) || 0) + 1);
+  }
+  const structuralDuplicatePairCount = [...structuralFingerprintCounts.values()]
+    .reduce((total, count) => total + count * (count - 1) / 2, 0);
+  if (structuralDuplicatePairCount > 0) errors.push("structural-template-duplicates");
+  const largestShare = (values) => {
+    if (!values.length) return 0;
+    const counts = new Map();
+    for (const value of values) counts.set(value, (counts.get(value) || 0) + 1);
+    return Math.max(...counts.values()) / values.length;
+  };
+  const maximumDiscourseStructureShare = largestShare(discourseStructureIds);
+  const maximumReasoningPathShare = largestShare(reasoningPathIds);
+  if (inputs.length === 20) {
+    if (new Set(discourseStructureIds).size < 5) errors.push("insufficient-discourse-structure-diversity");
+    if (new Set(reasoningPathIds).size < 4) errors.push("insufficient-reasoning-path-diversity");
+    if (new Set(genreIds).size < 5) errors.push("insufficient-genre-diversity");
+    if (maximumDiscourseStructureShare > 0.3) errors.push("discourse-structure-overconcentration");
+    if (maximumReasoningPathShare > 0.3) errors.push("reasoning-path-overconcentration");
+  }
 
   const correctPositionCounts = [0, 0, 0, 0];
   for (const audit of questionAudits) {
@@ -449,7 +489,14 @@ export function auditTr8ParagraphBatch(inputs = [], reviews = [], config = {}) {
       longestCorrectRate: Number(longestCorrectRate.toFixed(2)),
       correctPositionCounts: Object.freeze(correctPositionCounts),
       semanticDuplicatePairCount: semanticDuplicatePairs.length,
-      maximumObservedSimilarity: Number(maximumObservedSimilarity.toFixed(2))
+      maximumObservedSimilarity: Number(maximumObservedSimilarity.toFixed(2)),
+      structuralDuplicatePairCount,
+      distinctDiversityPlanCount: new Set(diversityPlanIds).size,
+      distinctDiscourseStructureCount: new Set(discourseStructureIds).size,
+      distinctReasoningPathCount: new Set(reasoningPathIds).size,
+      distinctGenreCount: new Set(genreIds).size,
+      maximumDiscourseStructureShare: Number(maximumDiscourseStructureShare.toFixed(2)),
+      maximumReasoningPathShare: Number(maximumReasoningPathShare.toFixed(2))
     })
   });
 }

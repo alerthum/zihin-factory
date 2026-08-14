@@ -8,12 +8,19 @@ function response(status, payload) {
 }
 
 function canonical(id) {
+  const index = id === "q1" ? 1 : 2;
   return {
     schemaVersion: "3.0", id,
     curriculum: { grade: 8, courseId: "turkce", outcomeIds: ["tr.pre-tymm.g8.turkce.t-8-3-17"] },
     verifier: { verified: true },
     contentStatus: "HUMAN_REVIEW_REQUIRED",
-    content: { humanReview: { gameAdaptationAllowed: false } }
+    content: { humanReview: { gameAdaptationAllowed: false } },
+    styleProfile: {
+      diversityPlanId: `plan-${index}`,
+      discourseStructureId: `discourse-${index}`,
+      reasoningPathId: "multi-source-convergence",
+      genreId: `genre-${index}`
+    }
   };
 }
 
@@ -22,7 +29,10 @@ function completedDetail(overrides = {}) {
     kind: "assessment.tr8-paragraph-benchmark", batchId: "tr8-smoke-run-42", sampleSize: 2,
     status: "PENDING_HUMAN_REVIEW", engineeringPassCount: 2, automatedIssues: [],
     humanReviewStatus: "NOT_MEASURED", pilotReady: false,
-    qualityEvidence: { sampleSize: 2, duplicateRate: 0, longestCorrectRate: 0, uniqueAnswerRate: 100, explanationEvidenceRate: 100 },
+    qualityEvidence: {
+      sampleSize: 2, duplicateRate: 0, longestCorrectRate: 0, uniqueAnswerRate: 100, explanationEvidenceRate: 100,
+      structuralDuplicatePairCount: 0, distinctDiversityPlanCount: 2, distinctDiscourseStructureCount: 2
+    },
     ...overrides
   };
   return {

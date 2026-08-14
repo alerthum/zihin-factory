@@ -35,6 +35,9 @@ function validateCompletedSmoke(detail) {
   if (Number(evidence.longestCorrectRate) > 35) errors.push("longest-answer-leakage");
   if (Number(evidence.uniqueAnswerRate) !== 100) errors.push("unique-answer-rate");
   if (Number(evidence.explanationEvidenceRate) !== 100) errors.push("explanation-evidence-rate");
+  if (Number(evidence.structuralDuplicatePairCount) !== 0) errors.push("structural-template-duplicates");
+  if (Number(evidence.distinctDiversityPlanCount) !== 2) errors.push("diversity-plan-count");
+  if (Number(evidence.distinctDiscourseStructureCount) !== 2) errors.push("discourse-structure-count");
 
   const canonicalQuestions = (detail?.artifacts ?? [])
     .filter((artifact) => artifact?.kind === "assessment-candidate")
@@ -48,6 +51,10 @@ function validateCompletedSmoke(detail) {
     if (question.verifier?.verified !== true) errors.push(`canonical-verifier:${question.id ?? "unknown"}`);
     if (question.contentStatus !== "HUMAN_REVIEW_REQUIRED") errors.push(`canonical-status:${question.id ?? "unknown"}`);
     if (question.content?.humanReview?.gameAdaptationAllowed !== false) errors.push(`canonical-game-lock:${question.id ?? "unknown"}`);
+    if (!question.styleProfile?.diversityPlanId
+      || !question.styleProfile?.discourseStructureId
+      || !question.styleProfile?.reasoningPathId
+      || !question.styleProfile?.genreId) errors.push(`canonical-structural-plan:${question.id ?? "unknown"}`);
   }
   if (new Set(canonicalQuestions.map((question) => question.id)).size !== canonicalQuestions.length) errors.push("duplicate-canonical-id");
   if (errors.length) throw new Error(`tr8-smoke-failed:${[...new Set(errors)].join(",")}`);
@@ -130,6 +137,8 @@ export function smokeReportMarkdown(report, { runUrl = "" } = {}) {
 - Tekrar oranı: ${String(evidence.duplicateRate ?? "ölçülemedi")}%
 - En uzun doğru şık oranı: ${String(evidence.longestCorrectRate ?? "ölçülemedi")}%
 - Açıklama-kanıt oranı: ${String(evidence.explanationEvidenceRate ?? "ölçülemedi")}%
+- Yapısal kalıp tekrarı: ${String(evidence.structuralDuplicatePairCount ?? "ölçülemedi")}
+- Farklı söylem yapısı: ${String(evidence.distinctDiscourseStructureCount ?? "ölçülemedi")}
 - İnsan incelemesi: **henüz yapılmadı**
 - 20 soruluk calibration: **otomatik başlatılmadı**
 ${runUrl ? `- [GitHub Actions kanıtı](${runUrl})` : ""}

@@ -5,7 +5,8 @@ import {
   generatorSystemPrompt,
   parseEngineeringReview,
   parseGeneratedCandidate,
-  reviewerPrompt
+  reviewerPrompt,
+  tr8DiversityPlan
 } from "./tr8-paragraph-family.js";
 import { auditTr8ParagraphBatch } from "./canonical-quality-core.js";
 
@@ -39,6 +40,7 @@ export async function runTr8Benchmark({
   const instances = [];
   for (let itemIndex = 0; itemIndex < boundedSampleSize; itemIndex += 1) {
     const instanceId = `${batchId}-item-${String(itemIndex + 1).padStart(2, "0")}`;
+    const diversityPlan = tr8DiversityPlan(itemIndex);
     let revision = "";
     let finalInstance = null;
     for (let attempt = 1; attempt <= boundedAttempts; attempt += 1) {
@@ -51,13 +53,15 @@ export async function runTr8Benchmark({
             instanceId,
             theme: themes[itemIndex % Math.max(1, themes.length)] || undefined,
             morphologyNotes,
+            diversityPlan,
             revision
           })
         });
         const candidate = parseGeneratedCandidate(producer.content);
         const provisional = compileCandidate(candidate, {
           producerModel: producer.model,
-          benchmarkExcerpts
+          benchmarkExcerpts,
+          diversityPlan
         });
         const deterministicIssues = provisional.audit.errors
           .filter((issue) => issue !== "independent-verification-required");
@@ -83,6 +87,7 @@ export async function runTr8Benchmark({
           const compiled = compileCandidate(candidate, {
             producerModel: producer.model,
             benchmarkExcerpts,
+            diversityPlan,
             proof: {
               solverId: `${TR8_MAIN_IDEA_FAMILY_V1.familyId}:annotation-solver-v1`,
               independentVerifierId: `independent-model:${reviewer.model}`,
@@ -148,7 +153,9 @@ export async function runTr8Benchmark({
     familyId: TR8_MAIN_IDEA_FAMILY_V1.familyId,
     batchId,
     sampleSize: boundedSampleSize,
-    status: engineeringPassCount === boundedSampleSize ? "PENDING_HUMAN_REVIEW" : "ENGINEERING_INCOMPLETE",
+    status: engineeringPassCount === boundedSampleSize && automatedIssues.length === 0
+      ? "PENDING_HUMAN_REVIEW"
+      : "ENGINEERING_INCOMPLETE",
     engineeringPassCount,
     engineeringPassRate: Number((engineeringPassCount / boundedSampleSize).toFixed(2)),
     quarantinedCount,
@@ -162,7 +169,14 @@ export async function runTr8Benchmark({
       uniqueAnswerRate: Number((uniqueAnswerCount / boundedSampleSize * 100).toFixed(1)),
       explanationEvidenceRate: Number((explanationEvidenceCount / boundedSampleSize * 100).toFixed(1)),
       correctPositionCounts: automatedBatchAudit.metrics.correctPositionCounts,
-      maximumObservedSimilarity: automatedBatchAudit.metrics.maximumObservedSimilarity
+      maximumObservedSimilarity: automatedBatchAudit.metrics.maximumObservedSimilarity,
+      structuralDuplicatePairCount: automatedBatchAudit.metrics.structuralDuplicatePairCount,
+      distinctDiversityPlanCount: automatedBatchAudit.metrics.distinctDiversityPlanCount,
+      distinctDiscourseStructureCount: automatedBatchAudit.metrics.distinctDiscourseStructureCount,
+      distinctReasoningPathCount: automatedBatchAudit.metrics.distinctReasoningPathCount,
+      distinctGenreCount: automatedBatchAudit.metrics.distinctGenreCount,
+      maximumDiscourseStructureShare: automatedBatchAudit.metrics.maximumDiscourseStructureShare,
+      maximumReasoningPathShare: automatedBatchAudit.metrics.maximumReasoningPathShare
     }),
     instances: Object.freeze(instances)
   });

@@ -112,7 +112,14 @@ export function buildTr8ApprovedPilotPackage({
       correctPositionCounts: audit.metrics.correctPositionCounts,
       longestCorrectRate: audit.metrics.longestCorrectRate,
       semanticDuplicatePairCount: audit.metrics.semanticDuplicatePairCount,
-      maximumObservedSimilarity: audit.metrics.maximumObservedSimilarity
+      maximumObservedSimilarity: audit.metrics.maximumObservedSimilarity,
+      structuralDuplicatePairCount: audit.metrics.structuralDuplicatePairCount,
+      distinctDiversityPlanCount: audit.metrics.distinctDiversityPlanCount,
+      distinctDiscourseStructureCount: audit.metrics.distinctDiscourseStructureCount,
+      distinctReasoningPathCount: audit.metrics.distinctReasoningPathCount,
+      distinctGenreCount: audit.metrics.distinctGenreCount,
+      maximumDiscourseStructureShare: audit.metrics.maximumDiscourseStructureShare,
+      maximumReasoningPathShare: audit.metrics.maximumReasoningPathShare
     },
     approvedQuestionIds: [...audit.exportableQuestionIds],
     reviewEvidence,

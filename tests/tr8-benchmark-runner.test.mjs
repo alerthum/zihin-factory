@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { runTr8Benchmark } from "../src/assessment/tr8-benchmark-runner.js";
-import { TR8_MAIN_IDEA_FAMILY_V1 } from "../src/assessment/tr8-paragraph-family.js";
+import { TR8_MAIN_IDEA_FAMILY_V1, tr8DiversityPlan } from "../src/assessment/tr8-paragraph-family.js";
 
 const stimulus = [
   "Bir okul radyosunun arşiv ekibi eski yayınları yalnız tarihlerine göre sıralamanın değişimi açıklamadığını fark etti.",
@@ -13,19 +13,24 @@ const stimulus = [
   "Böylece radyo arşivi eski sesleri saklayan bir depo olmaktan çıkıp okul yaşamındaki dönüşümün farklı izlerini birlikte okutan bir çalışma alanına dönüştü."
 ].join(" ");
 
-function candidate(instanceId) {
+function candidate(instanceId, itemIndex = 0) {
+  const diversityPlan = tr8DiversityPlan(itemIndex);
+  const correctOption = "Okul yaşamındaki değişimi anlamak için farklı arşiv kanıtları birlikte değerlendirilerek dönüşüm ve süreklilik karşılaştırılmalıdır.";
+  const wrongOptions = [
+    { text: "Eski radyo yayınlarını tarihlerine göre sıralamak okul kültüründeki bütün değişimi tek başına açıklamaya yeterlidir.", misconceptionId: "detail-as-main-idea", supportingEvidenceIds: ["E1"], contradictionEvidenceIds: ["E3", "E4"], feedback: "Tarih sırası metinde geçer; ancak ekip bunun değişimi tek başına açıklamadığını özellikle belirtmektedir." },
+    { text: "Bir programın sona ermesi öğrencilerin o programda tartıştığı bütün fikirlerin aynı anda unutulduğunu kanıtlar.", misconceptionId: "overgeneralized-main-idea", supportingEvidenceIds: ["E2"], contradictionEvidenceIds: ["E2"], feedback: "Programların sona ermesine rağmen fikirlerin yeni yayınlarda yaşaması bu kesin genellemeyi doğrudan çürütmektedir." },
+    { text: "Arşiv sergisinde çizelge kullanılması dinleyici mektuplarındaki görüşlerin değerlendirilmesini bütünüyle gereksiz hâle getirir.", misconceptionId: "relation-reversal", supportingEvidenceIds: ["E3"], contradictionEvidenceIds: ["E4"], feedback: "Çizelge ve mektuplar birbirini gereksiz kılmaz; metindeki sonuç bu kaynakların birlikte okunmasına dayanmaktadır." }
+  ];
+  const optionRows = wrongOptions.map((row) => ({ ...row, correct: false }));
+  optionRows.splice(diversityPlan.correctIndex, 0, { text: correctOption, correct: true });
   return {
     familyId: TR8_MAIN_IDEA_FAMILY_V1.familyId,
     instanceId,
-    stimulus,
+    diversityPlan,
+    stimulus: `${stimulus} ${itemIndex === 0 ? "Pusula, afiş, mikrofon, merdiven, kiremit, sandalye, bilet ve mühür ayrı kataloglara işlendi." : "Dürbün, nilüfer, iskele, fener, halat, yelken, çakıl ve yosun ayrı çizelgelere işlendi."}`,
     stem: "Bu parçanın ana düşüncesi aşağıdakilerden hangisidir?",
-    options: [
-      "Okul yaşamındaki değişimi anlamak için farklı arşiv kanıtları birlikte değerlendirilerek dönüşüm ve süreklilik karşılaştırılmalıdır.",
-      "Eski radyo yayınlarını tarihlerine göre sıralamak okul kültüründeki bütün değişimi tek başına açıklamaya yeterlidir.",
-      "Bir programın sona ermesi öğrencilerin o programda tartıştığı bütün fikirlerin aynı anda unutulduğunu kanıtlar.",
-      "Arşiv sergisinde çizelge kullanılması dinleyici mektuplarındaki görüşlerin değerlendirilmesini bütünüyle gereksiz hâle getirir."
-    ],
-    correctIndex: 0,
+    options: optionRows.map((row) => row.text),
+    correctIndex: diversityPlan.correctIndex,
     evidenceUnits: [
       { id: "E1", text: "Tarih sırası tek başına değişimi açıklamamıştır." },
       { id: "E2", text: "Yayınlar değişirken katılım alışkanlığı sürmüştür." },
@@ -44,17 +49,19 @@ function candidate(instanceId) {
       { text: "Değişen yayın biçimleriyle süren öğrenci katılımı arasındaki ilişkiyi düşün." },
       { text: "Tek ayrıntıyı değil bütün kanıtların ortak sonucunu kapsayan seçeneği ara." }
     ],
-    distractors: [
-      { optionIndex: 1, misconceptionId: "detail-as-main-idea", supportingEvidenceIds: ["E1"], contradictionEvidenceIds: ["E3", "E4"], feedback: "Tarih sırası metinde geçer; ancak ekip bunun değişimi tek başına açıklamadığını özellikle belirtmektedir." },
-      { optionIndex: 2, misconceptionId: "overgeneralized-main-idea", supportingEvidenceIds: ["E2"], contradictionEvidenceIds: ["E2"], feedback: "Programların sona ermesine rağmen fikirlerin yeni yayınlarda yaşaması bu kesin genellemeyi doğrudan çürütmektedir." },
-      { optionIndex: 3, misconceptionId: "relation-reversal", supportingEvidenceIds: ["E3"], contradictionEvidenceIds: ["E4"], feedback: "Çizelge ve mektuplar birbirini gereksiz kılmaz; metindeki sonuç bu kaynakların birlikte okunmasına dayanmaktadır." }
-    ]
+    distractors: optionRows.map((row, optionIndex) => row.correct ? null : ({
+      optionIndex,
+      misconceptionId: row.misconceptionId,
+      supportingEvidenceIds: row.supportingEvidenceIds,
+      contradictionEvidenceIds: row.contradictionEvidenceIds,
+      feedback: row.feedback
+    })).filter(Boolean)
   };
 }
 
-function passingReview() {
+function passingReview(correctIndex = 0) {
   return JSON.stringify({
-    selectedOptionIndex: 0,
+    selectedOptionIndex: correctIndex,
     supportingEvidenceIds: ["E2", "E3", "E4"],
     decision: "PASS",
     score: 93,
@@ -75,8 +82,8 @@ test("bounded smoke batch reaches human review only after independent engineerin
   const result = await runTr8Benchmark({
     sampleSize: 2,
     batchId: "smoke01",
-    produce: async ({ itemIndex }) => ({ model: "producer-model", content: JSON.stringify(candidate(`smoke01-item-${itemIndex + 1}`)) }),
-    review: async () => ({ model: "reviewer-model", content: passingReview() })
+    produce: async ({ itemIndex }) => ({ model: "producer-model", content: JSON.stringify(candidate(`smoke01-item-${itemIndex + 1}`, itemIndex)) }),
+    review: async ({ itemIndex }) => ({ model: "reviewer-model", content: passingReview(tr8DiversityPlan(itemIndex).correctIndex) })
   });
   assert.equal(result.status, "PENDING_HUMAN_REVIEW");
   assert.equal(result.engineeringPassCount, 2);
@@ -84,6 +91,9 @@ test("bounded smoke batch reaches human review only after independent engineerin
   assert.equal(result.instances.every((instance) => instance.producerModel !== instance.reviewerModel), true);
   assert.equal(result.qualityEvidence.uniqueAnswerRate, 100);
   assert.equal(result.qualityEvidence.explanationEvidenceRate, 100);
+  assert.equal(result.qualityEvidence.structuralDuplicatePairCount, 0);
+  assert.equal(result.qualityEvidence.distinctDiversityPlanCount, 2);
+  assert.equal(result.qualityEvidence.distinctDiscourseStructureCount, 2);
 });
 
 test("same producer and reviewer model cannot certify an item", async () => {

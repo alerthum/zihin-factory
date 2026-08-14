@@ -30,6 +30,13 @@ export type BenchmarkResult = {
     explanationEvidenceRate: number;
     correctPositionCounts: readonly number[];
     maximumObservedSimilarity: number;
+    structuralDuplicatePairCount: number;
+    distinctDiversityPlanCount: number;
+    distinctDiscourseStructureCount: number;
+    distinctReasoningPathCount: number;
+    distinctGenreCount: number;
+    maximumDiscourseStructureShare: number;
+    maximumReasoningPathShare: number;
   };
   instances: readonly BenchmarkInstance[];
 };

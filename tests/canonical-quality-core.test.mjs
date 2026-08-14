@@ -7,6 +7,7 @@ import {
   defineHumanReviewDecision
 } from "../src/assessment/canonical-quality-core.js";
 import { buildTr8ApprovedPilotPackage } from "../src/assessment/tr8-approved-package.js";
+import { tr8DiversityPlan } from "../src/assessment/tr8-paragraph-family.js";
 
 const paragraphWords = [
   "Bir araştırma grubundaki öğrenciler okul bahçesinde yetişen bitkileri haftalar boyunca gözlemledi.",
@@ -42,6 +43,7 @@ const distinctContexts = [
 ];
 
 function question(index = 0, correctIndex = 0) {
+  const diversityPlan = tr8DiversityPlan(index % 20);
   const baseOptions = [
     "Bir gelişimi doğru yorumlamak için farklı belirtiler ve gözlem koşulları birlikte değerlendirilmelidir.",
     "Bitkilerin gelişimini anlamanın en güvenilir yolu yalnızca haftalık boy değişimini düzenli ölçmektir.",
@@ -117,7 +119,14 @@ function question(index = 0, correctIndex = 0) {
       independentVerifierId: "tr8-entailment-verifier-v1",
       verified: true
     },
-    styleProfile: { genre: "expository", voice: "natural" },
+    styleProfile: {
+      genre: diversityPlan.genreId,
+      genreId: diversityPlan.genreId,
+      voice: "natural",
+      diversityPlanId: diversityPlan.planId,
+      discourseStructureId: diversityPlan.discourseStructureId,
+      reasoningPathId: diversityPlan.reasoningPathId
+    },
     provenance: {
       generatedFromSourceIds: ["meb-grade8-turkish-program"],
       styleReferenceIds: ["licensed-benchmark-morphology"]
@@ -214,10 +223,20 @@ test("the batch gate detects template repetition even when identifiers differ", 
   assert.equal(audit.errors.includes("exact-question-duplicate"), true);
 });
 
+test("the batch gate rejects the same structural plan even when words and identifiers differ", () => {
+  const questions = Array.from({ length: 20 }, (_, index) => question(index, index % 4));
+  questions[1].styleProfile = structuredClone(questions[0].styleProfile);
+  const reviews = questions.map((item, index) => review(item.id, index));
+  const audit = auditTr8ParagraphBatch(questions, reviews);
+  assert.equal(audit.ok, false);
+  assert.equal(audit.errors.includes("duplicate-diversity-plan"), true);
+  assert.equal(audit.errors.includes("structural-template-duplicates"), true);
+});
+
 function completedBenchmarkResult() {
   return {
     kind: "assessment.tr8-paragraph-benchmark",
-    familyId: "tr8-turkish-main-idea-v1",
+    familyId: "tr8.paragraph.main-idea-synthesis.v1",
     batchId: "tr8-pilot-001",
     sampleSize: 20,
     status: "PENDING_HUMAN_REVIEW",
