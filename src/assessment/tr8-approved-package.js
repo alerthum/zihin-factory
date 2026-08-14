@@ -47,6 +47,30 @@ function publicReviewEvidence(questionId, normalizedReviews) {
   });
 }
 
+function blindReviewEvidence(result) {
+  const instances = Array.isArray(result?.instances) ? result.instances : [];
+  const ids = instances.map((instance) => String(instance?.instanceId ?? "").trim());
+  const complete = instances.length === 20
+    && ids.every(Boolean)
+    && new Set(ids).size === 20
+    && instances.every((instance) => {
+      const producerModel = String(instance?.producerModel ?? "").trim();
+      const blindReviewerModel = String(instance?.blindReviewerModel ?? "").trim();
+      const qualityReviewerModel = String(instance?.reviewerModel ?? "").trim();
+      return instance?.status === "ENGINEERING_PASS"
+        && producerModel
+        && blindReviewerModel
+        && qualityReviewerModel
+        && producerModel !== blindReviewerModel
+        && producerModel !== qualityReviewerModel
+        && instance?.engineeringDecision === "PASS"
+        && instance?.blindResolutionLocked === true
+        && instance?.independentlyResolved === true
+        && instance?.blindAnswerKeyExposed === false;
+    });
+  return Object.freeze({ complete, count: complete ? instances.length : 0 });
+}
+
 export function buildTr8ApprovedPilotPackage({
   factoryVersion = "unknown",
   jobId,
@@ -64,6 +88,8 @@ export function buildTr8ApprovedPilotPackage({
   if (Number(result.engineeringPassCount) !== 20) blockers.push("engineering-pass-count-not-twenty");
   if (Array.isArray(result.automatedIssues) && result.automatedIssues.length) blockers.push("automated-issues-present");
   if (!Array.isArray(candidates) || candidates.length !== 20) blockers.push("twenty-canonical-candidates-required");
+  const blindReview = blindReviewEvidence(result);
+  if (!blindReview.complete) blockers.push("twenty-blind-review-evidence-required");
   if (blockers.length) throw new Error(`pilot-export-blocked:${blockers.join(",")}`);
 
   const audit = auditTr8ParagraphBatch(candidates, reviews, { requiredSampleSize: 20 });
@@ -99,6 +125,7 @@ export function buildTr8ApprovedPilotPackage({
     },
     releaseGate: {
       engineeringPassCount: Number(result.engineeringPassCount),
+      blindReviewCount: blindReview.count,
       humanReviewCount: audit.metrics.humanReviewCount,
       humanDecisionCount: audit.metrics.humanDecisionCount,
       humanApprovalCount: audit.metrics.humanApprovalCount,

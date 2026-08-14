@@ -242,6 +242,18 @@ function completedBenchmarkResult() {
     status: "PENDING_HUMAN_REVIEW",
     engineeringPassCount: 20,
     automatedIssues: [],
+    instances: Array.from({ length: 20 }, (_, index) => ({
+      instanceId: `tr8-pilot-item-${index + 1}`,
+      status: "ENGINEERING_PASS",
+      producerModel: `producer-${index + 1}`,
+      blindReviewerModel: `blind-reviewer-${index + 1}`,
+      reviewerModel: `quality-reviewer-${index + 1}`,
+      engineeringDecision: "PASS",
+      engineeringScore: 93,
+      blindResolutionLocked: true,
+      independentlyResolved: true,
+      blindAnswerKeyExposed: false
+    })),
     qualityEvidence: { duplicateRate: 0, explanationEvidenceRate: 100 }
   };
 }
@@ -258,11 +270,31 @@ test("approved export contains only human-approved questions and no reviewer ide
     exportedAt: "2026-08-14T18:00:00.000Z"
   });
   assert.equal(packageArtifact.releaseGate.pilotEligible, true);
+  assert.equal(packageArtifact.releaseGate.blindReviewCount, 20);
   assert.equal(packageArtifact.releaseGate.exportableQuestionCount, 16);
   assert.equal(packageArtifact.questions.length, 16);
   assert.equal(packageArtifact.questions.every((item) => item.contentStatus === "PILOT_READY"), true);
   assert.equal(packageArtifact.questions.every((item) => item.content.humanReview.gameAdaptationAllowed === true), true);
   assert.doesNotMatch(JSON.stringify(packageArtifact.reviewEvidence), /reviewer_pilot|notes/i);
+});
+
+test("approved export rejects missing, reused or answer-exposed blind review evidence", () => {
+  const questions = Array.from({ length: 20 }, (_, index) => question(index, index % 4));
+  const reviews = questions.map((item, index) => review(item.id, index));
+  for (const mutate of [
+    (result) => { result.instances.pop(); },
+    (result) => { result.instances[1].instanceId = result.instances[0].instanceId; },
+    (result) => { result.instances[2].blindAnswerKeyExposed = true; }
+  ]) {
+    const result = structuredClone(completedBenchmarkResult());
+    mutate(result);
+    assert.throws(() => buildTr8ApprovedPilotPackage({
+      jobId: "00000000-0000-4000-8000-000000000099",
+      result,
+      candidates: questions,
+      reviews
+    }), /twenty-blind-review-evidence-required/);
+  }
 });
 
 test("two-question smoke can never become an approved export package", () => {
