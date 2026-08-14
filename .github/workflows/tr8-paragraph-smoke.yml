@@ -1,0 +1,68 @@
+name: TR8 Paragraph Smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: "İki soruluk smoke işini gerçekten başlat"
+        required: true
+        default: DO_NOT_RUN
+        type: choice
+        options:
+          - DO_NOT_RUN
+          - RUN_TR8_SMOKE
+
+concurrency:
+  group: zihin-factory-tr8-paragraph-smoke
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  smoke:
+    if: ${{ inputs.confirmation == 'RUN_TR8_SMOKE' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Run bounded two-question smoke
+        env:
+          FACTORY_BASE_URL: https://zihin-factory-governor.alerthum.workers.dev
+          FACTORY_ADMIN_TOKEN: ${{ secrets.FACTORY_ADMIN_TOKEN }}
+          FACTORY_SMOKE_CONFIRM: RUN_TR8_SMOKE
+        run: node scripts/run-tr8-smoke.mjs
+
+      - name: Upload smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tr8-paragraph-smoke-${{ github.run_id }}
+          path: tr8-smoke-output/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Add result to the single control center
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const reportPath = 'tr8-smoke-output/report.md';
+            if (!fs.existsSync(reportPath)) {
+              core.setFailed('Smoke report is missing; control center was not updated.');
+              return;
+            }
+            await github.rest.issues.createComment({
+              ...context.repo,
+              issue_number: 3,
+              body: fs.readFileSync(reportPath, 'utf8')
+            });
