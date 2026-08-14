@@ -1,0 +1,75 @@
+name: TR8 Paragraph Calibration 20
+
+on:
+  workflow_dispatch:
+    inputs:
+      smoke_job_id:
+        description: "Başarılı iki soruluk smoke job UUID"
+        required: true
+        type: string
+      confirmation:
+        description: "20 soruluk calibration işini gerçekten başlat"
+        required: true
+        default: DO_NOT_RUN
+        type: choice
+        options:
+          - DO_NOT_RUN
+          - RUN_TR8_CALIBRATION_20
+
+concurrency:
+  group: zihin-factory-tr8-paragraph-calibration
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  calibration:
+    if: ${{ inputs.confirmation == 'RUN_TR8_CALIBRATION_20' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Run bounded twenty-question calibration
+        env:
+          FACTORY_BASE_URL: https://zihin-factory-governor.alerthum.workers.dev
+          FACTORY_ADMIN_TOKEN: ${{ secrets.FACTORY_ADMIN_TOKEN }}
+          FACTORY_EXPECTED_VERSION: 0.10.1
+          FACTORY_SMOKE_JOB_ID: ${{ inputs.smoke_job_id }}
+          FACTORY_CALIBRATION_CONFIRM: RUN_TR8_CALIBRATION_20
+        run: node scripts/run-tr8-calibration.mjs
+
+      - name: Upload calibration evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tr8-paragraph-calibration-${{ github.run_id }}
+          path: tr8-calibration-output/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Add result to the single control center
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const reportPath = 'tr8-calibration-output/report.md';
+            if (!fs.existsSync(reportPath)) {
+              core.setFailed('Calibration report is missing; control center was not updated.');
+              return;
+            }
+            await github.rest.issues.createComment({
+              ...context.repo,
+              issue_number: 3,
+              body: fs.readFileSync(reportPath, 'utf8')
+            });
+

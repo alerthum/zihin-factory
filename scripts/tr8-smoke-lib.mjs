@@ -19,7 +19,7 @@ function parseJson(value, field) {
   catch { throw new Error(`${field}:invalid-json`); }
 }
 
-function validateCompletedSmoke(detail) {
+export function validateCompletedSmoke(detail) {
   const result = parseJson(detail?.job?.result_json, "job.result_json");
   const errors = [];
   if (result.kind !== JOB_TYPE) errors.push("wrong-result-kind");
