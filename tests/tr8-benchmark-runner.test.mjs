@@ -82,6 +82,8 @@ test("bounded smoke batch reaches human review only after independent engineerin
   assert.equal(result.engineeringPassCount, 2);
   assert.equal(result.instances.every((instance) => instance.canonical.verifier.verified), true);
   assert.equal(result.instances.every((instance) => instance.producerModel !== instance.reviewerModel), true);
+  assert.equal(result.qualityEvidence.uniqueAnswerRate, 100);
+  assert.equal(result.qualityEvidence.explanationEvidenceRate, 100);
 });
 
 test("same producer and reviewer model cannot certify an item", async () => {

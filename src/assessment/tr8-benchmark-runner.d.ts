@@ -21,6 +21,16 @@ export type BenchmarkResult = {
   engineeringPassCount: number;
   engineeringPassRate: number;
   quarantinedCount: number;
+  automatedIssues: readonly string[];
+  qualityEvidence: {
+    sampleSize: number;
+    duplicateRate: number;
+    longestCorrectRate: number;
+    uniqueAnswerRate: number;
+    explanationEvidenceRate: number;
+    correctPositionCounts: readonly number[];
+    maximumObservedSimilarity: number;
+  };
   instances: readonly BenchmarkInstance[];
 };
 

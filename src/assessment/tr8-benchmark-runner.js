@@ -7,6 +7,7 @@ import {
   parseGeneratedCandidate,
   reviewerPrompt
 } from "./tr8-paragraph-family.js";
+import { auditTr8ParagraphBatch } from "./canonical-quality-core.js";
 
 function boundedInteger(value, minimum, maximum, field) {
   const output = Number(value);
@@ -129,6 +130,19 @@ export async function runTr8Benchmark({
 
   const engineeringPassCount = instances.filter((instance) => instance?.status === "ENGINEERING_PASS").length;
   const quarantinedCount = instances.filter((instance) => instance?.status === "QUARANTINED").length;
+  const canonicalQuestions = instances.map((instance) => instance?.canonical).filter(Boolean);
+  const automatedBatchAudit = auditTr8ParagraphBatch(canonicalQuestions, [], { requiredSampleSize: boundedSampleSize });
+  const possiblePairs = boundedSampleSize * (boundedSampleSize - 1) / 2;
+  const uniqueAnswerCount = automatedBatchAudit.questionAudits
+    .filter((audit) => Number.isInteger(audit.metrics.correctIndex) && audit.metrics.correctIndex >= 0).length;
+  const explanationEvidenceCount = canonicalQuestions
+    .filter((question) => Array.isArray(question.solutionGraph)
+      && question.solutionGraph.length >= 3
+      && question.solutionGraph.every((step) => String(step?.evidence ?? "").trim())).length;
+  const automatedIssues = automatedBatchAudit.errors.filter((issue) =>
+    !issue.startsWith("human-")
+    && issue !== "human-review-contract-failures"
+    && !issue.startsWith("review-for-unknown-question"));
   return Object.freeze({
     kind: "assessment.tr8-paragraph-benchmark",
     familyId: TR8_MAIN_IDEA_FAMILY_V1.familyId,
@@ -138,6 +152,18 @@ export async function runTr8Benchmark({
     engineeringPassCount,
     engineeringPassRate: Number((engineeringPassCount / boundedSampleSize).toFixed(2)),
     quarantinedCount,
+    automatedIssues: Object.freeze(automatedIssues),
+    qualityEvidence: Object.freeze({
+      sampleSize: boundedSampleSize,
+      duplicateRate: possiblePairs
+        ? Number((automatedBatchAudit.metrics.semanticDuplicatePairCount / possiblePairs * 100).toFixed(1))
+        : 0,
+      longestCorrectRate: Number((automatedBatchAudit.metrics.longestCorrectRate * 100).toFixed(1)),
+      uniqueAnswerRate: Number((uniqueAnswerCount / boundedSampleSize * 100).toFixed(1)),
+      explanationEvidenceRate: Number((explanationEvidenceCount / boundedSampleSize * 100).toFixed(1)),
+      correctPositionCounts: automatedBatchAudit.metrics.correctPositionCounts,
+      maximumObservedSimilarity: automatedBatchAudit.metrics.maximumObservedSimilarity
+    }),
     instances: Object.freeze(instances)
   });
 }

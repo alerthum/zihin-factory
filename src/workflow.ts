@@ -326,6 +326,8 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
           engineeringPassCount:benchmark.engineeringPassCount,
           engineeringPassRate:benchmark.engineeringPassRate,
           quarantinedCount:benchmark.quarantinedCount,
+          automatedIssues:benchmark.automatedIssues,
+          qualityEvidence:benchmark.qualityEvidence,
           humanReviewStatus:"NOT_MEASURED",
           pilotReady:false,
           instances:instanceSummary
