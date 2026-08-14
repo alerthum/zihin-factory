@@ -423,8 +423,17 @@ export function parseEngineeringReview(raw, {
     structuralPlanFidelity: score(parsed.dimensions?.structuralPlanFidelity)
   };
   const requestedDecision = String(parsed.decision || "RETRY").toUpperCase();
-  const qualityReviewerIndependent = Boolean(producerModel && reviewerModel && producerModel !== reviewerModel);
   const committedBlindResolution = blindResolution && typeof blindResolution === "object" ? blindResolution : null;
+  const qualityReviewerIndependentFromProducer = Boolean(
+    producerModel && reviewerModel && producerModel !== reviewerModel
+  );
+  const qualityReviewerIndependentFromBlind = Boolean(
+    reviewerModel
+      && committedBlindResolution?.reviewerModel
+      && reviewerModel !== committedBlindResolution.reviewerModel
+  );
+  const qualityReviewerIndependent = qualityReviewerIndependentFromProducer
+    && qualityReviewerIndependentFromBlind;
   const selectedOptionIndex = Number(committedBlindResolution?.selectedOptionIndex);
   const reviewerEvidenceIds = Array.isArray(committedBlindResolution?.supportingEvidenceIds)
     ? committedBlindResolution.supportingEvidenceIds.map(String)
@@ -458,7 +467,8 @@ export function parseEngineeringReview(raw, {
       ? "PASS"
       : "RETRY";
   const reasons = Array.isArray(parsed.reasons) ? parsed.reasons.map(String).slice(0, 8) : [];
-  if (!qualityReviewerIndependent) reasons.push("producer-quality-reviewer-model-must-differ");
+  if (!qualityReviewerIndependentFromProducer) reasons.push("producer-quality-reviewer-model-must-differ");
+  if (!qualityReviewerIndependentFromBlind) reasons.push("blind-and-quality-reviewer-models-must-differ");
   if (!blindResolutionLocked) reasons.push("blind-resolution-missing-or-changed");
   if (!independentlyResolved) reasons.push("independent-answer-or-evidence-mismatch");
   if (requestedDecision === "PASS" && !hardPass) reasons.push("hard-engineering-threshold-not-met");

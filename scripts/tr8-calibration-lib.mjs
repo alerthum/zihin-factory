@@ -1,6 +1,14 @@
 import { validateBlindReviewEvidence, validateCompletedSmoke } from "./tr8-smoke-lib.mjs";
 
 const JOB_TYPE = "assessment.tr8-paragraph-benchmark";
+const HUMAN_SCORE_DIMENSIONS = Object.freeze([
+  "correctness",
+  "optionOrRubricQuality",
+  "ageLanguageFit",
+  "hintNonLeakage",
+  "feedbackTeachingValue",
+  "naturalness"
+]);
 const THEMES = Object.freeze([
   "kent belleğinde farklı belge türleri",
   "sulak alan gözleminde değişim ve süreklilik",
@@ -93,6 +101,46 @@ export function validateCompletedCalibration(detail) {
   return { result, canonicalQuestions };
 }
 
+export function validateSmokeHumanReview(detail, { smokeJobId, expectedQuestionIds = [] } = {}) {
+  const errors = [];
+  const safeSmokeJobId = String(smokeJobId ?? "").trim();
+  const expectedIds = [...new Set(expectedQuestionIds.map(String).filter(Boolean))];
+  const questionIds = Array.isArray(detail?.questionIds) ? detail.questionIds.map(String) : [];
+  const reviews = Array.isArray(detail?.reviews) ? detail.reviews : [];
+  const summary = detail?.summary && typeof detail.summary === "object" ? detail.summary : {};
+  if (detail?.ok !== true) errors.push("review-response-not-ok");
+  if (!safeSmokeJobId || String(detail?.jobId ?? "") !== safeSmokeJobId) errors.push("review-job-mismatch");
+  if (expectedIds.length !== 2) errors.push(`expected-smoke-question-count:${expectedIds.length}/2`);
+  if (questionIds.length !== 2 || new Set(questionIds).size !== 2) errors.push("review-question-count");
+  if (expectedIds.some((id) => !questionIds.includes(id)) || questionIds.some((id) => !expectedIds.includes(id))) {
+    errors.push("review-question-set-mismatch");
+  }
+  for (const questionId of expectedIds) {
+    const rows = reviews.filter((review) => String(review?.questionId ?? "") === questionId);
+    if (!rows.length) {
+      errors.push(`human-review-missing:${questionId}`);
+      continue;
+    }
+    for (const review of rows) {
+      if (review?.decision !== "APPROVE") errors.push(`human-review-not-approved:${questionId}`);
+      if (Array.isArray(review?.criticalBlockers) && review.criticalBlockers.length) {
+        errors.push(`human-review-critical-blocker:${questionId}`);
+      }
+      if (HUMAN_SCORE_DIMENSIONS.some((dimension) => Number(review?.scores?.[dimension]) < 4)) {
+        errors.push(`human-review-score-below-four:${questionId}`);
+      }
+    }
+  }
+  if (Number(summary.total) !== 2 || Number(summary.reviewed) !== 2 || Number(summary.accepted) !== 2) {
+    errors.push("human-review-summary-not-two-approved");
+  }
+  if (summary.complete !== true || Number(summary.coverageRate) !== 100 || Number(summary.acceptanceRate) !== 100) {
+    errors.push("human-review-summary-incomplete");
+  }
+  if (errors.length) throw new Error(`tr8-smoke-human-review-failed:${[...new Set(errors)].join(",")}`);
+  return Object.freeze({ approvedQuestionCount: 2, questionIds: Object.freeze([...expectedIds]) });
+}
+
 export async function runTr8Calibration({
   baseUrl,
   token,
@@ -117,7 +165,14 @@ export async function runTr8Calibration({
   }
   const smokeDetail = await responseJson(await fetchImpl(`${safeBaseUrl}/jobs/${safeSmokeJobId}`, { headers }), "smoke-evidence");
   if (String(smokeDetail?.job?.status ?? "unknown") !== "completed") throw new Error("smoke-evidence:not-completed");
-  validateCompletedSmoke(smokeDetail);
+  const validatedSmoke = validateCompletedSmoke(smokeDetail);
+  const smokeReviewDetail = await responseJson(await fetchImpl(
+    `${safeBaseUrl}/admin/tr8-benchmark/${safeSmokeJobId}/reviews`, { headers }
+  ), "smoke-human-review");
+  const smokeHumanReview = validateSmokeHumanReview(smokeReviewDetail, {
+    smokeJobId: safeSmokeJobId,
+    expectedQuestionIds: validatedSmoke.canonicalQuestions.map((question) => question.id)
+  });
 
   const requestBody = {
     jobType: JOB_TYPE,
@@ -157,6 +212,7 @@ export async function runTr8Calibration({
         sampleSize: validated.result.sampleSize,
         qualityEvidence: validated.result.qualityEvidence,
         blindReviewCount: validated.result.instances.length,
+        smokeHumanReviewCount: smokeHumanReview.approvedQuestionCount,
         canonicalQuestionIds: validated.canonicalQuestions.map((question) => question.id),
         nextAction: "Complete human review for all twenty questions; do not export or import automatically."
       });
@@ -175,9 +231,10 @@ export function calibrationReportMarkdown(report, { runUrl = "" } = {}) {
 
 - Sonuç: **${passed ? "PASS" : "FAIL"}**
 - Önkoşul smoke job: \`${String(report?.smokeJobId ?? "doğrulanamadı")}\`
+- Smoke insan onayı: ${Number(report?.smokeHumanReviewCount ?? 0)} / 2
 - Calibration job: \`${String(report?.jobId ?? "oluşturulamadı")}\`
 - Engineering: ${Number(report?.engineeringPassCount ?? 0)} / ${Number(report?.sampleSize ?? 20)}
-- Kör bağımsız çözüm: ${Number(report?.blindReviewCount ?? 0)} / ${Number(report?.sampleSize ?? 20)}
+- Üç-model bağımsızlık: ${Number(report?.blindReviewCount ?? 0)} / ${Number(report?.sampleSize ?? 20)}
 - Semantik tekrar oranı: ${String(evidence.duplicateRate ?? "ölçülemedi")}%
 - Yapısal kalıp tekrar çifti: ${String(evidence.structuralDuplicatePairCount ?? "ölçülemedi")}
 - Çeşitlilik: ${String(evidence.distinctDiversityPlanCount ?? "?")} plan · ${String(evidence.distinctDiscourseStructureCount ?? "?")} söylem · ${String(evidence.distinctReasoningPathCount ?? "?")} akıl yürütme · ${String(evidence.distinctGenreCount ?? "?")} tür

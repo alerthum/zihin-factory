@@ -5,7 +5,7 @@ Bu sürüm, mevcut fabrikanın sınırsız ve ölçülemeyen görev üretimini �
 ## Sürümde bulunan kapılar
 
 - KuzenlerYarisiyor kanonik soru sözleşmesi `3.0`
-- üretici ile bağımsız engineering reviewer ayrımı
+- üretici, kör çözücü ve son kalite reviewer'ı arasında üç-model ayrımı
 - dört yakın şık ve üç ayrı kavram yanılgısı
 - cevap uzunluğu, cevap konumu, ipucu sızıntısı ve anlamsal tekrar denetimi
 - üç aşamalı ipucu, kanıtlı çözüm grafiği ve seçeneğe özel öğretici geri bildirim

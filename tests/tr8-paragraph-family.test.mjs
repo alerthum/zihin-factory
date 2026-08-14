@@ -137,14 +137,19 @@ test("engineering reviewer is independent and cannot override deterministic fail
   const blindResolution = parseBlindResolution(passingReview, { producerModel: "model-a", reviewerModel: "model-b" });
   const deterministicFailure = parseEngineeringReview(passingReview, {
     producerModel: "model-a",
-    reviewerModel: "model-b",
+    reviewerModel: "model-c",
     deterministicIssues: ["duplicate-options"],
     blindResolution,
     ...reviewContext
   });
   assert.equal(deterministicFailure.decision, "RETRY");
-  const independentPass = parseEngineeringReview(passingReview, {
+  const sameBlindAndQualityModel = parseEngineeringReview(passingReview, {
     producerModel: "model-a", reviewerModel: "model-b", blindResolution, ...reviewContext
+  });
+  assert.equal(sameBlindAndQualityModel.decision, "RETRY");
+  assert.equal(sameBlindAndQualityModel.reasons.includes("blind-and-quality-reviewer-models-must-differ"), true);
+  const independentPass = parseEngineeringReview(passingReview, {
+    producerModel: "model-a", reviewerModel: "model-c", blindResolution, ...reviewContext
   });
   assert.equal(independentPass.decision, "PASS");
   assert.equal(independentPass.independentlyResolved, true);
@@ -152,14 +157,14 @@ test("engineering reviewer is independent and cannot override deterministic fail
   const changedAfterBlind = JSON.parse(passingReview);
   changedAfterBlind.selectedOptionIndex = 1;
   const rejectedChangedAnswer = parseEngineeringReview(JSON.stringify(changedAfterBlind), {
-    producerModel: "model-a", reviewerModel: "model-b", blindResolution, ...reviewContext
+    producerModel: "model-a", reviewerModel: "model-c", blindResolution, ...reviewContext
   });
   assert.equal(rejectedChangedAnswer.decision, "RETRY");
   assert.equal(rejectedChangedAnswer.reasons.includes("blind-resolution-missing-or-changed"), true);
   const cosmeticRelabel = JSON.parse(passingReview);
   cosmeticRelabel.dimensions.structuralPlanFidelity = 70;
   const rejectedRelabel = parseEngineeringReview(JSON.stringify(cosmeticRelabel), {
-    producerModel: "model-a", reviewerModel: "model-b", blindResolution, ...reviewContext
+    producerModel: "model-a", reviewerModel: "model-c", blindResolution, ...reviewContext
   });
   assert.equal(rejectedRelabel.decision, "RETRY");
 });

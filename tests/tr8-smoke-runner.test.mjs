@@ -100,6 +100,22 @@ test("smoke rejects a reviewer record that saw the answer key", async () => {
   }), /blind-answer-key-exposed/);
 });
 
+test("smoke rejects a quality reviewer that reuses the blind solver model", async () => {
+  const unsafe = completedDetail();
+  const result = JSON.parse(unsafe.job.result_json);
+  result.instances[0].reviewerModel = result.instances[0].blindReviewerModel;
+  unsafe.job.result_json = JSON.stringify(result);
+  const replies = [
+    response(200, { ok: true, version: "0.10.1" }),
+    response(202, { ok: true, jobId: "00000000-0000-4000-8000-000000000046" }),
+    response(200, unsafe)
+  ];
+  await assert.rejects(() => runTr8Smoke({
+    baseUrl: "https://factory.example", token: "secret", runId: "46",
+    fetchImpl: async () => replies.shift(), sleep: async () => {}, maxPolls: 1
+  }), /reviewer-model-independence/);
+});
+
 test("engineering shortfall keeps the smoke and twenty-question calibration closed", async () => {
   const replies = [
     response(200, { ok: true, version: "0.10.1" }),
@@ -128,7 +144,7 @@ test("smoke report tells the operator that human review and calibration remain c
     qualityEvidence: { duplicateRate: 0, longestCorrectRate: 0, explanationEvidenceRate: 100 }
   });
   assert.match(markdown, /İnsan incelemesi: \*\*henüz yapılmadı\*\*/);
-  assert.match(markdown, /Kör bağımsız çözüm: 2 \/ 2/);
+  assert.match(markdown, /Üç-model bağımsızlık: 2 \/ 2/);
   assert.match(markdown, /20 soruluk calibration: \*\*otomatik başlatılmadı\*\*/);
 });
 

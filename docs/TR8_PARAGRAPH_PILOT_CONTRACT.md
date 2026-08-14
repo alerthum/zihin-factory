@@ -12,7 +12,7 @@ Bir aday soru şu kanıtlar olmadan pilot paketine giremez:
 - her yanlış seçenek için kanıt ve öğretici geri bildirim,
 - cevabı söylemeyen üç aşamalı ipucu,
 - en az üç görünür çözüm adımı,
-- birbirinden farklı çözücü ve bağımsız doğrulayıcı,
+- birbirinden farklı üretici, cevap anahtarını görmeyen kör çözücü ve son kalite doğrulayıcısı,
 - cevap uzunluğu sızıntısı ve tekrar kontrolleri,
 - üreticinin değiştiremediği 20 ayrı `diversityPlanId`; beş söylem yapısı, dört akıl yürütme yolu ve beş tür arasında dengeli dağılım,
 - benchmark kaynaklarından beş kelimeyi aşan ifade kopyasına karşı telif kapısı,
@@ -24,4 +24,4 @@ Konu, kişi ve nesne adlarını değiştirmek yeni soru kalıbı sayılmaz. Her 
 
 ## Sorumluluk sınırı
 
-Bu çekirdek üretim Worker'ını veya dashboard'u değiştirmez. Sonraki adım, mevcut 0.10.1 taslağındaki yararlı üretici/bağımsız inceleyici parçalarını bu sözleşmeye bağlamak ve Observer'a yalnızca bu kapının ölçümlerini eklemektir.
+Bu çekirdek mevcut Worker ve dashboard akışına fail-closed bağlanır. Üç-model kanıtı smoke, calibration ve insan onaylı export sırasında yeniden doğrulanmadan Observer hiçbir pilot başarısı raporlamaz.

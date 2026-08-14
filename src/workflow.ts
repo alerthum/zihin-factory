@@ -289,11 +289,12 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
             }
             return {model:String(produced.model),content:String(produced.content)};
           },
-          review: async ({itemIndex,attempt,stage,producerModel,system,prompt}: {itemIndex:number;attempt:number;stage:"blind-resolution"|"quality-audit";producerModel:string;system:string;prompt:string}) => {
+          review: async ({itemIndex,attempt,stage,producerModel,blindReviewerModel,system,prompt}: {itemIndex:number;attempt:number;stage:"blind-resolution"|"quality-audit";producerModel:string;blindReviewerModel?:string;system:string;prompt:string}) => {
             const reviewed = await step.do(`tr8 ${stage} ${itemIndex + 1}.${attempt}`, {retries:{limit:1,delay:"7 seconds",backoff:"exponential"}}, async () => {
               const ai = await runFactoryAI(this.env,{
                 system,
-                prompt,maxTokens:900,temperature:0,purpose:"reviewer",avoidModels:[producerModel],
+                prompt,maxTokens:900,temperature:0,purpose:"reviewer",
+                avoidModels:[producerModel,...(blindReviewerModel ? [blindReviewerModel] : [])],
                 onHeartbeat:() => providerHeartbeat(this.env.DB,jobId)
               });
               return {model:ai.model,content:ai.content};

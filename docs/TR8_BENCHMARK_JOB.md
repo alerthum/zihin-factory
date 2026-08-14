@@ -18,6 +18,6 @@ Birleştirme ve kontrollü deployment sonrasında mevcut yetkili `POST /jobs` yo
 }
 ```
 
-Varsayılan smoke partisi iki sorudur. Her soru en fazla iki kez üretilir. Üretici ve bağımsız inceleyici aynı model olamaz. Deterministik kapılardan veya bağımsız cevap çözümünden geçmeyen aday insan incelemesine ulaşamaz.
+Varsayılan smoke partisi iki sorudur. Her soru en fazla iki kez üretilir. Üretici, cevabı görmeden çözen kör reviewer ve tam paketi denetleyen kalite reviewer'ı üç farklı model olmak zorundadır. Deterministik kapılardan veya bağımsız cevap çözümünden geçmeyen aday insan incelemesine ulaşamaz.
 
 İş sonucu `PENDING_HUMAN_REVIEW` olsa bile `pilotReady` değeri `false` kalır. Gerçek öğretmen/uzman kararları tamamlanmadan 20 soruluk paket KuzenlerYarisiyor'a aktarılamaz.

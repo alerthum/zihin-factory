@@ -63,6 +63,7 @@ function blindReviewEvidence(result) {
         && qualityReviewerModel
         && producerModel !== blindReviewerModel
         && producerModel !== qualityReviewerModel
+        && blindReviewerModel !== qualityReviewerModel
         && instance?.engineeringDecision === "PASS"
         && instance?.blindResolutionLocked === true
         && instance?.independentlyResolved === true

@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       smoke_job_id:
-        description: "Başarılı iki soruluk smoke job UUID"
+        description: "Başarılı ve 2/2 güçlü insan onaylı smoke job UUID"
         required: true
         type: string
       confirmation:

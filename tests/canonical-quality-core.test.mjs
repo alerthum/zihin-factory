@@ -284,7 +284,8 @@ test("approved export rejects missing, reused or answer-exposed blind review evi
   for (const mutate of [
     (result) => { result.instances.pop(); },
     (result) => { result.instances[1].instanceId = result.instances[0].instanceId; },
-    (result) => { result.instances[2].blindAnswerKeyExposed = true; }
+    (result) => { result.instances[2].blindAnswerKeyExposed = true; },
+    (result) => { result.instances[3].reviewerModel = result.instances[3].blindReviewerModel; }
   ]) {
     const result = structuredClone(completedBenchmarkResult());
     mutate(result);

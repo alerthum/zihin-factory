@@ -4,7 +4,8 @@ import { readFileSync } from "node:fs";
 import {
   calibrationReportMarkdown,
   runTr8Calibration,
-  validateCompletedCalibration
+  validateCompletedCalibration,
+  validateSmokeHumanReview
 } from "../scripts/tr8-calibration-lib.mjs";
 
 function response(status, payload) {
@@ -93,11 +94,46 @@ function detail({ sampleSize, engineeringPassCount = sampleSize, structuralDupli
   };
 }
 
+function smokeHumanReviews({ decision = "APPROVE", score = 5 } = {}) {
+  const scores = {
+    correctness: score,
+    optionOrRubricQuality: score,
+    ageLanguageFit: score,
+    hintNonLeakage: score,
+    feedbackTeachingValue: score,
+    naturalness: score
+  };
+  return {
+    ok: true,
+    jobId: "00000000-0000-4000-8000-000000000049",
+    batchId: "tr8-smoke-run-49",
+    questionIds: ["q1", "q2"],
+    reviews: ["q1", "q2"].map((questionId, index) => ({
+      reviewId: `review-${index + 1}`,
+      questionId,
+      reviewerAnonId: "reviewer-smoke",
+      reviewerRole: "TURKISH_TEACHER",
+      decision,
+      scores,
+      criticalBlockers: []
+    })),
+    summary: {
+      total: 2,
+      reviewed: 2,
+      accepted: decision === "APPROVE" ? 2 : 0,
+      acceptanceRate: decision === "APPROVE" ? 100 : 0,
+      coverageRate: 100,
+      complete: true
+    }
+  };
+}
+
 test("calibration requires a successful smoke and starts exactly twenty planned questions", async () => {
   const calls = [];
   const replies = [
     response(200, { ok: true, version: "0.10.1" }),
     response(200, detail({ sampleSize: 2 })),
+    response(200, smokeHumanReviews()),
     response(202, { ok: true, jobId: "00000000-0000-4000-8000-000000000050" }),
     response(200, detail({ sampleSize: 20 }))
   ];
@@ -110,15 +146,49 @@ test("calibration requires a successful smoke and starts exactly twenty planned 
     sleep: async () => {},
     maxPolls: 1
   });
-  const request = JSON.parse(calls[2].options.body);
+  const request = JSON.parse(calls[3].options.body);
   assert.equal(request.jobType, "assessment.tr8-paragraph-benchmark");
   assert.equal(request.payload.sampleSize, 20);
   assert.equal(request.payload.maxAttempts, 2);
   assert.equal(request.payload.themes.length, 20);
   assert.equal(report.status, "PASS");
   assert.equal(report.blindReviewCount, 20);
+  assert.equal(report.smokeHumanReviewCount, 2);
   assert.equal(report.canonicalQuestionIds.length, 20);
   assert.doesNotMatch(JSON.stringify(report), /secret/);
+});
+
+test("calibration cannot start before both smoke questions receive strong human approval", async () => {
+  assert.throws(() => validateSmokeHumanReview(smokeHumanReviews({ decision: "REVISE" }), {
+    smokeJobId: "00000000-0000-4000-8000-000000000049",
+    expectedQuestionIds: ["q1", "q2"]
+  }), /human-review-not-approved/);
+  assert.throws(() => validateSmokeHumanReview(smokeHumanReviews({ score: 3 }), {
+    smokeJobId: "00000000-0000-4000-8000-000000000049",
+    expectedQuestionIds: ["q1", "q2"]
+  }), /human-review-score-below-four/);
+
+  const calls = [];
+  const incomplete = smokeHumanReviews();
+  incomplete.reviews.pop();
+  incomplete.summary.reviewed = 1;
+  incomplete.summary.accepted = 1;
+  incomplete.summary.coverageRate = 50;
+  incomplete.summary.complete = false;
+  const replies = [
+    response(200, { ok: true, version: "0.10.1" }),
+    response(200, detail({ sampleSize: 2 })),
+    response(200, incomplete)
+  ];
+  await assert.rejects(() => runTr8Calibration({
+    baseUrl: "https://factory.example",
+    token: "secret",
+    smokeJobId: "00000000-0000-4000-8000-000000000049",
+    runId: "52",
+    fetchImpl: async (url, options = {}) => { calls.push({ url, options }); return replies.shift(); }
+  }), /human-review-missing:q2/);
+  assert.equal(calls.length, 3);
+  assert.equal(calls.some((call) => call.url === "https://factory.example/jobs"), false);
 });
 
 test("calibration fails closed when any blind solution is missing or answer-exposed", () => {
@@ -167,10 +237,12 @@ test("calibration report explicitly leaves human review and export manual", () =
     engineeringPassCount: 20,
     sampleSize: 20,
     blindReviewCount: 20,
+    smokeHumanReviewCount: 2,
     qualityEvidence: { structuralDuplicatePairCount: 0, distinctDiversityPlanCount: 20 }
   });
   assert.match(markdown, /İnsan incelemesi: \*\*0\/20 — otomatik yapılmadı\*\*/);
-  assert.match(markdown, /Kör bağımsız çözüm: 20 \/ 20/);
+  assert.match(markdown, /Üç-model bağımsızlık: 20 \/ 20/);
+  assert.match(markdown, /Smoke insan onayı: 2 \/ 2/);
   assert.match(markdown, /Onaylı paket exportu: \*\*otomatik yapılmadı\*\*/);
 });
 
@@ -178,6 +250,7 @@ test("calibration workflow is manual, smoke-gated and writes only to control iss
   const workflow = readFileSync(new URL("../.github/workflows/tr8-paragraph-calibration.yml", import.meta.url), "utf8");
   assert.match(workflow, /workflow_dispatch:/);
   assert.match(workflow, /smoke_job_id:/);
+  assert.match(workflow, /2\/2 güçlü insan onaylı smoke job UUID/);
   assert.match(workflow, /RUN_TR8_CALIBRATION_20/);
   assert.match(workflow, /secrets\.FACTORY_ADMIN_TOKEN/);
   assert.match(workflow, /issue_number: 3/);

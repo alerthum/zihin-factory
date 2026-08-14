@@ -33,6 +33,7 @@ export function validateBlindReviewEvidence(result, expectedCount) {
     if (instance?.status !== "ENGINEERING_PASS") errors.push(`blind-instance-status:${id}`);
     if (!producerModel || !blindReviewerModel || producerModel === blindReviewerModel) errors.push(`blind-model-independence:${id}`);
     if (!producerModel || !qualityReviewerModel || producerModel === qualityReviewerModel) errors.push(`quality-model-independence:${id}`);
+    if (!blindReviewerModel || !qualityReviewerModel || blindReviewerModel === qualityReviewerModel) errors.push(`reviewer-model-independence:${id}`);
     if (instance?.engineeringDecision !== "PASS") errors.push(`blind-engineering-decision:${id}`);
     if (instance?.blindResolutionLocked !== true) errors.push(`blind-resolution-unlocked:${id}`);
     if (instance?.independentlyResolved !== true) errors.push(`blind-answer-unresolved:${id}`);
@@ -160,7 +161,7 @@ export function smokeReportMarkdown(report, { runUrl = "" } = {}) {
 - Sonuç: **${passed ? "PASS" : "FAIL"}**
 - Job: \`${String(report?.jobId ?? "oluşturulamadı")}\`
 - Engineering: ${Number(report?.engineeringPassCount ?? 0)} / ${Number(report?.sampleSize ?? 2)}
-- Kör bağımsız çözüm: ${Number(report?.blindReviewCount ?? 0)} / ${Number(report?.sampleSize ?? 2)}
+- Üç-model bağımsızlık: ${Number(report?.blindReviewCount ?? 0)} / ${Number(report?.sampleSize ?? 2)}
 - Tekrar oranı: ${String(evidence.duplicateRate ?? "ölçülemedi")}%
 - En uzun doğru şık oranı: ${String(evidence.longestCorrectRate ?? "ölçülemedi")}%
 - Açıklama-kanıt oranı: ${String(evidence.explanationEvidenceRate ?? "ölçülemedi")}%
