@@ -77,6 +77,7 @@ jobs:
               .map(pull => `- [#${pull.number} — ${pull.title}](${pull.html_url}) · base: \`${pull.base.ref}\``)
               .join('\n') || '- Açık fabrika taslak PR’ı yok.';
             let latestSmoke = '_Henüz iki soruluk smoke sonucu yok._';
+            let latestCalibration = '_Henüz 20 soruluk calibration sonucu yok._';
             if (existing) {
               const comments = await github.paginate(github.rest.issues.listComments, {
                 owner,
@@ -87,6 +88,9 @@ jobs:
               const smokeComment = [...comments].reverse().find(comment =>
                 String(comment.body || '').includes('## 8. sınıf Türkçe · 2 soruluk smoke'));
               if (smokeComment) latestSmoke = `${smokeComment.body}\n\n[Smoke yorum kaydı](${smokeComment.html_url})`;
+              const calibrationComment = [...comments].reverse().find(comment =>
+                String(comment.body || '').includes('## 8. sınıf Türkçe · 20 soruluk calibration'));
+              if (calibrationComment) latestCalibration = `${calibrationComment.body}\n\n[Calibration yorum kaydı](${calibrationComment.html_url})`;
             }
             const controlCenter = `# Zihin Factory — Tek Kontrol Merkezi
 
@@ -122,6 +126,10 @@ jobs:
             ## Son 8. sınıf Türkçe smoke sonucu
 
             ${latestSmoke}
+
+            ## Son 8. sınıf Türkçe calibration sonucu
+
+            ${latestCalibration}
 
             ## Son doğrulanmış durum
 

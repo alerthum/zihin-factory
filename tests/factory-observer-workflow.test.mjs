@@ -17,6 +17,8 @@ test("control issue keeps active draft PRs and the latest bounded smoke result",
   assert.match(workflow, /8\. sınıf Türkçe · 2 soruluk smoke/);
   assert.match(workflow, /## Aktif fabrika taslakları/);
   assert.match(workflow, /## Son 8\. sınıf Türkçe smoke sonucu/);
+  assert.match(workflow, /20 soruluk calibration/);
+  assert.match(workflow, /## Son 8\. sınıf Türkçe calibration sonucu/);
 });
 
 test("control issue remains the single operator page after every refresh", () => {
