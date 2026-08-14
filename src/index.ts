@@ -7,6 +7,7 @@ import { guidanceForError } from "./operations/guidance";
 import { learningSummary } from "./learning/memory";
 import { maybeSendFactoryDigest } from "./notifications/digest";
 import { normalizeTr8HumanReview, summarizeTr8HumanReviews, type HumanReviewInput } from "./assessment/tr8-human-review.js";
+import { buildTr8ApprovedPilotPackage } from "./assessment/tr8-approved-package.js";
 export { FactoryWorkflow } from "./workflow";
 
 type Env = {
@@ -100,6 +101,20 @@ async function tr8HumanReviews(db: D1Database, jobId: string): Promise<HumanRevi
      FROM TR8_HUMAN_REVIEWS WHERE job_id=? ORDER BY question_id,created_at`
   ).bind(jobId).all<Tr8HumanReviewRow>();
   return rows.results.map(humanReviewFromRow);
+}
+
+async function tr8BenchmarkCandidates(db: D1Database, jobId: string): Promise<Record<string,unknown>[]> {
+  const artifacts = await db.prepare(
+    `SELECT metadata_json FROM ARTIFACTS WHERE job_id=? AND kind='assessment-candidate' ORDER BY created_at`
+  ).bind(jobId).all<{metadata_json:string}>();
+  const candidates: Record<string,unknown>[] = [];
+  for (const artifact of artifacts.results) {
+    try {
+      const parsed=JSON.parse(artifact.metadata_json) as {canonical?:unknown};
+      if(parsed?.canonical&&typeof parsed.canonical==="object") candidates.push(parsed.canonical as Record<string,unknown>);
+    } catch { /* malformed artifacts remain non-exportable */ }
+  }
+  return candidates;
 }
 
 async function tr8BenchmarkContext(db: D1Database, jobId: string): Promise<{jobId:string;batchId:string;questionIds:string[];result:Record<string,unknown>}|null> {
@@ -463,6 +478,25 @@ export default {
       const reviews = await tr8HumanReviews(env.DB,context.jobId);
       const summary = summarizeTr8HumanReviews(reviews,context.questionIds);
       return json({ok:true,jobId:context.jobId,batchId:context.batchId,questionIds:context.questionIds,reviews,summary});
+    }
+
+    const tr8ApprovedPackageMatch = url.pathname.match(/^\/admin\/tr8-benchmark\/([0-9a-f-]+)\/approved-package$/i);
+    if (request.method === "GET" && tr8ApprovedPackageMatch) {
+      const context=await tr8BenchmarkContext(env.DB,tr8ApprovedPackageMatch[1]);
+      if(!context) return json({ok:false,error:"tr8_benchmark_job_not_found"},{status:404});
+      const [reviews,candidates,versionRow]=await Promise.all([
+        tr8HumanReviews(env.DB,context.jobId),
+        tr8BenchmarkCandidates(env.DB,context.jobId),
+        env.DB.prepare(`SELECT value FROM FACTORY_META WHERE key='factory_version'`).first<{value:string}>()
+      ]);
+      try {
+        const approvedPackage=buildTr8ApprovedPilotPackage({
+          factoryVersion:versionRow?.value ?? "unknown",jobId:context.jobId,result:context.result,candidates,reviews
+        });
+        return json({ok:true,package:approvedPackage});
+      } catch(error) {
+        return json({ok:false,error:"pilot_package_not_eligible",detail:error instanceof Error?error.message:String(error)},{status:409});
+      }
     }
 
     if (request.method === "POST" && url.pathname === "/admin/tr8-benchmark/review") {
