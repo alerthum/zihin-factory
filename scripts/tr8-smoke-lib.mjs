@@ -58,6 +58,7 @@ export async function runTr8Smoke({
   baseUrl,
   token,
   runId,
+  expectedVersion = "0.10.1",
   fetchImpl = fetch,
   sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
   pollIntervalMs = 10_000,
@@ -66,7 +67,12 @@ export async function runTr8Smoke({
   const safeBaseUrl = required(baseUrl, "baseUrl").replace(/\/$/, "");
   const safeToken = required(token, "token");
   const safeRunId = required(runId, "runId").replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 60);
+  const safeExpectedVersion = required(expectedVersion, "expectedVersion");
   const headers = { authorization: `Bearer ${safeToken}`, "content-type": "application/json" };
+  const preflight = await responseJson(await fetchImpl(`${safeBaseUrl}/dashboard/api`, { headers }), "preflight");
+  if (String(preflight?.version ?? "unknown") !== safeExpectedVersion) {
+    throw new Error(`factory-version-mismatch:${String(preflight?.version ?? "unknown")}/${safeExpectedVersion}`);
+  }
   const requestBody = {
     jobType: JOB_TYPE,
     priority: 10,
@@ -95,6 +101,7 @@ export async function runTr8Smoke({
       return Object.freeze({
         ok: true,
         status: "PASS",
+        factoryVersion: safeExpectedVersion,
         jobId,
         batchId: validated.result.batchId,
         pollCount: poll,

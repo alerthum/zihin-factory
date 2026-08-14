@@ -13,6 +13,7 @@ try {
   report = await runTr8Smoke({
     baseUrl: process.env.FACTORY_BASE_URL,
     token: process.env.FACTORY_ADMIN_TOKEN,
+    expectedVersion: process.env.FACTORY_EXPECTED_VERSION ?? "0.10.1",
     runId: process.env.GITHUB_RUN_ID ?? `manual-${Date.now()}`
   });
 } catch (error) {

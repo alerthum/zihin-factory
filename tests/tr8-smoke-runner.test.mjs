@@ -37,6 +37,7 @@ function completedDetail(overrides = {}) {
 test("cloud smoke starts exactly two questions, polls and proves canonical artifacts", async () => {
   const calls = [];
   const replies = [
+    response(200, { ok: true, version: "0.10.1" }),
     response(202, { ok: true, jobId: "00000000-0000-4000-8000-000000000042" }),
     response(200, { ok: true, job: { status: "running" } }),
     response(200, completedDetail())
@@ -46,7 +47,7 @@ test("cloud smoke starts exactly two questions, polls and proves canonical artif
     fetchImpl: async (url, options = {}) => { calls.push({ url, options }); return replies.shift(); },
     sleep: async () => {}, pollIntervalMs: 0, maxPolls: 3
   });
-  const request = JSON.parse(calls[0].options.body);
+  const request = JSON.parse(calls[1].options.body);
   assert.equal(request.jobType, "assessment.tr8-paragraph-benchmark");
   assert.equal(request.payload.sampleSize, 2);
   assert.equal(request.payload.maxAttempts, 2);
@@ -57,6 +58,7 @@ test("cloud smoke starts exactly two questions, polls and proves canonical artif
 
 test("engineering shortfall keeps the smoke and twenty-question calibration closed", async () => {
   const replies = [
+    response(200, { ok: true, version: "0.10.1" }),
     response(202, { ok: true, jobId: "00000000-0000-4000-8000-000000000043" }),
     response(200, completedDetail({ engineeringPassCount: 1 }))
   ];
@@ -64,6 +66,15 @@ test("engineering shortfall keeps the smoke and twenty-question calibration clos
     baseUrl: "https://factory.example", token: "secret", runId: "43",
     fetchImpl: async () => replies.shift(), sleep: async () => {}, maxPolls: 1
   }), /engineering-pass-not-two/);
+});
+
+test("old live factory version is rejected before a smoke job can be created", async () => {
+  const calls = [];
+  await assert.rejects(() => runTr8Smoke({
+    baseUrl: "https://factory.example", token: "secret", runId: "44",
+    fetchImpl: async (url) => { calls.push(url); return response(200, { ok: true, version: "0.9.0" }); }
+  }), /factory-version-mismatch:0\.9\.0\/0\.10\.1/);
+  assert.deepEqual(calls, ["https://factory.example/dashboard/api"]);
 });
 
 test("smoke report tells the operator that human review and calibration remain closed", () => {

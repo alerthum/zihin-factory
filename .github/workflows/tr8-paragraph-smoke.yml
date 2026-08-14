@@ -38,6 +38,7 @@ jobs:
         env:
           FACTORY_BASE_URL: https://zihin-factory-governor.alerthum.workers.dev
           FACTORY_ADMIN_TOKEN: ${{ secrets.FACTORY_ADMIN_TOKEN }}
+          FACTORY_EXPECTED_VERSION: 0.10.1
           FACTORY_SMOKE_CONFIRM: RUN_TR8_SMOKE
         run: node scripts/run-tr8-smoke.mjs
 
