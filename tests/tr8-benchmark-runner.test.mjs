@@ -71,7 +71,8 @@ function passingReview(correctIndex = 0) {
       distractorQuality: 91,
       languageNaturalness: 88,
       answerDefensibility: 95,
-      originality: 94
+      originality: 94,
+      structuralPlanFidelity: 92
     },
     reasons: ["Independent evidence resolution agrees"],
     revisionInstructions: ""

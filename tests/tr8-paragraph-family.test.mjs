@@ -120,7 +120,8 @@ test("engineering reviewer is independent and cannot override deterministic fail
       distractorQuality: 91,
       languageNaturalness: 88,
       answerDefensibility: 95,
-      originality: 94
+      originality: 94,
+      structuralPlanFidelity: 92
     },
     reasons: ["All evidence gates pass"],
     revisionInstructions: ""
@@ -138,6 +139,12 @@ test("engineering reviewer is independent and cannot override deterministic fail
   const independentPass = parseEngineeringReview(passingReview, { producerModel: "model-a", reviewerModel: "model-b", ...reviewContext });
   assert.equal(independentPass.decision, "PASS");
   assert.equal(independentPass.independentlyResolved, true);
+  const cosmeticRelabel = JSON.parse(passingReview);
+  cosmeticRelabel.dimensions.structuralPlanFidelity = 70;
+  const rejectedRelabel = parseEngineeringReview(JSON.stringify(cosmeticRelabel), {
+    producerModel: "model-a", reviewerModel: "model-b", ...reviewContext
+  });
+  assert.equal(rejectedRelabel.decision, "RETRY");
 });
 
 test("review prompt treats prose quality as insufficient evidence", () => {
@@ -145,4 +152,6 @@ test("review prompt treats prose quality as insufficient evidence", () => {
   const prompt = reviewerPrompt({ canonical: compiled.canonical, deterministicIssues: [] });
   assert.match(prompt, /Polished prose is not evidence/i);
   assert.match(prompt, /unique answer defensibility/i);
+  assert.match(prompt, /actual stimulus/i);
+  assert.match(prompt, /cosmetic relabeling/i);
 });
