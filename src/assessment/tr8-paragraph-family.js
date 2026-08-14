@@ -337,8 +337,65 @@ export function generatorPrompt({
   })}`;
 }
 
-export function reviewerPrompt({ family = TR8_MAIN_IDEA_FAMILY_V1, canonical, deterministicIssues = [] } = {}) {
-  return `Independently review this 8th-grade Turkish item. Polished prose is not evidence of quality. Check unique answer defensibility, multi-evidence synthesis, diagnostic distractors, natural Turkish, answer leakage and originality. Verify that the actual stimulus—not merely its labels—realizes styleProfile.discourseStructureId, reasoningPathId and genreId; reject cosmetic relabeling of the same template. Never provide hidden chain-of-thought. Return strict JSON only.\n\nFAMILY:\n${JSON.stringify(family)}\n\nDETERMINISTIC ISSUES:\n${JSON.stringify(deterministicIssues)}\n\nITEM:\n${JSON.stringify(canonical)}\n\nSCHEMA:\n{"selectedOptionIndex":0,"supportingEvidenceIds":["E1","E2","E3"],"decision":"PASS|RETRY|QUARANTINE","score":0,"dimensions":{"benchmarkFit":0,"reasoningQuality":0,"distractorQuality":0,"languageNaturalness":0,"answerDefensibility":0,"originality":0,"structuralPlanFidelity":0},"reasons":["specific reason"],"revisionInstructions":"specific changes"}`;
+function blindReviewItem(canonical = {}) {
+  return {
+    id: canonical.id,
+    curriculum: canonical.curriculum,
+    construct: canonical.construct,
+    content: {
+      stimulus: canonical.content?.stimulus,
+      stem: canonical.content?.stem,
+      options: canonical.content?.options,
+      evidenceMap: canonical.content?.evidenceMap
+    },
+    itemFormat: canonical.itemFormat,
+    responseModel: canonical.responseModel,
+    styleProfile: canonical.styleProfile,
+    provenance: canonical.provenance
+  };
+}
+
+export function blindReviewerPrompt({ family = TR8_MAIN_IDEA_FAMILY_V1, canonical, deterministicIssues = [] } = {}) {
+  return `Solve this 8th-grade Turkish item independently before seeing any author answer, hint, feedback or solution. Select exactly one option and cite the evidence-unit ids that support it. Reject ambiguity: if two options are defensible, return RETRY. Verify that the actual stimulus—not merely its labels—realizes styleProfile.discourseStructureId, reasoningPathId and genreId. Never provide hidden chain-of-thought. Return strict JSON only.\n\nFAMILY CONSTRUCT (no answer key):\n${JSON.stringify({ familyId: family.familyId, curriculum: family.curriculum, construct: family.construct })}\n\nDETERMINISTIC ISSUES:\n${JSON.stringify(deterministicIssues)}\n\nBLIND ITEM:\n${JSON.stringify(blindReviewItem(canonical))}\n\nSCHEMA:\n{"selectedOptionIndex":0,"supportingEvidenceIds":["E1","E2","E3"],"decision":"PASS|RETRY|QUARANTINE","reasons":["specific answer-defensibility reason"]}`;
+}
+
+export function parseBlindResolution(raw, { producerModel, reviewerModel } = {}) {
+  let parsed;
+  try {
+    parsed = JSON.parse(balancedObject(raw) ?? stripFences(raw));
+  } catch {
+    parsed = {};
+  }
+  const selectedOptionIndex = Number(parsed.selectedOptionIndex);
+  const supportingEvidenceIds = Array.isArray(parsed.supportingEvidenceIds)
+    ? [...new Set(parsed.supportingEvidenceIds.map(String).filter(Boolean))]
+    : [];
+  const requestedDecision = String(parsed.decision || "RETRY").toUpperCase();
+  const independentModel = Boolean(producerModel && reviewerModel && producerModel !== reviewerModel);
+  const validSelection = Number.isInteger(selectedOptionIndex) && selectedOptionIndex >= 0 && selectedOptionIndex <= 3;
+  const reasons = Array.isArray(parsed.reasons) ? parsed.reasons.map(String).slice(0, 8) : [];
+  if (!independentModel) reasons.push("producer-blind-reviewer-model-must-differ");
+  if (!validSelection) reasons.push("blind-selected-option-invalid");
+  if (!supportingEvidenceIds.length) reasons.push("blind-supporting-evidence-required");
+  return Object.freeze({
+    decision: requestedDecision === "QUARANTINE" ? "QUARANTINE" : requestedDecision === "PASS" && independentModel && validSelection && supportingEvidenceIds.length ? "PASS" : "RETRY",
+    selectedOptionIndex: validSelection ? selectedOptionIndex : null,
+    supportingEvidenceIds: Object.freeze(supportingEvidenceIds),
+    reasons: Object.freeze([...new Set(reasons)]),
+    producerModel: String(producerModel || ""),
+    reviewerModel: String(reviewerModel || ""),
+    independentModel,
+    answerKeyExposed: false
+  });
+}
+
+export function reviewerPrompt({ family = TR8_MAIN_IDEA_FAMILY_V1, canonical, deterministicIssues = [], blindResolution } = {}) {
+  const locked = {
+    selectedOptionIndex: blindResolution?.selectedOptionIndex ?? null,
+    supportingEvidenceIds: blindResolution?.supportingEvidenceIds ?? [],
+    reviewerModel: blindResolution?.reviewerModel ?? ""
+  };
+  return `Audit the complete authoring package for this 8th-grade Turkish item. The blind answer resolution below was committed before the answer key, hints, feedback and solution were revealed; do not change it. Polished prose is not evidence of quality. Check diagnostic distractors, option-specific teaching feedback, progressive non-leaking hints, visible solution evidence, natural Turkish, originality, answer defensibility and structural-plan fidelity. Reject cosmetic relabeling of the same template. Never provide hidden chain-of-thought. Return strict JSON only.\n\nLOCKED BLIND RESOLUTION:\n${JSON.stringify(locked)}\n\nFAMILY:\n${JSON.stringify(family)}\n\nDETERMINISTIC ISSUES:\n${JSON.stringify(deterministicIssues)}\n\nCOMPLETE ITEM:\n${JSON.stringify(canonical)}\n\nSCHEMA:\n{"selectedOptionIndex":${locked.selectedOptionIndex ?? 0},"supportingEvidenceIds":["E1","E2","E3"],"decision":"PASS|RETRY|QUARANTINE","score":0,"dimensions":{"benchmarkFit":0,"reasoningQuality":0,"distractorQuality":0,"languageNaturalness":0,"answerDefensibility":0,"originality":0,"structuralPlanFidelity":0},"reasons":["specific reason"],"revisionInstructions":"specific changes"}`;
 }
 
 export function parseEngineeringReview(raw, {
@@ -346,7 +403,8 @@ export function parseEngineeringReview(raw, {
   reviewerModel,
   deterministicIssues = [],
   expectedCorrectIndex,
-  requiredEvidenceIds = []
+  requiredEvidenceIds = [],
+  blindResolution
 } = {}) {
   let parsed;
   try {
@@ -365,13 +423,24 @@ export function parseEngineeringReview(raw, {
     structuralPlanFidelity: score(parsed.dimensions?.structuralPlanFidelity)
   };
   const requestedDecision = String(parsed.decision || "RETRY").toUpperCase();
-  const independentModel = Boolean(producerModel && reviewerModel && producerModel !== reviewerModel);
-  const selectedOptionIndex = Number(parsed.selectedOptionIndex);
-  const reviewerEvidenceIds = Array.isArray(parsed.supportingEvidenceIds) ? parsed.supportingEvidenceIds.map(String) : [];
+  const qualityReviewerIndependent = Boolean(producerModel && reviewerModel && producerModel !== reviewerModel);
+  const committedBlindResolution = blindResolution && typeof blindResolution === "object" ? blindResolution : null;
+  const selectedOptionIndex = Number(committedBlindResolution?.selectedOptionIndex);
+  const reviewerEvidenceIds = Array.isArray(committedBlindResolution?.supportingEvidenceIds)
+    ? committedBlindResolution.supportingEvidenceIds.map(String)
+    : [];
+  const qualitySelectedOptionIndex = Number(parsed.selectedOptionIndex);
+  const qualityEvidenceIds = Array.isArray(parsed.supportingEvidenceIds) ? parsed.supportingEvidenceIds.map(String) : [];
+  const blindResolutionLocked = Boolean(committedBlindResolution)
+    && committedBlindResolution.decision === "PASS"
+    && committedBlindResolution.independentModel === true
+    && (!Number.isInteger(qualitySelectedOptionIndex) || qualitySelectedOptionIndex === selectedOptionIndex)
+    && (!qualityEvidenceIds.length || reviewerEvidenceIds.every((id) => qualityEvidenceIds.includes(id)));
   const independentlyResolved = Number.isInteger(expectedCorrectIndex)
     && selectedOptionIndex === expectedCorrectIndex
     && requiredEvidenceIds.every((id) => reviewerEvidenceIds.includes(String(id)));
-  const hardPass = independentModel
+  const hardPass = qualityReviewerIndependent
+    && blindResolutionLocked
     && independentlyResolved
     && deterministicIssues.length === 0
     && score(parsed.score) >= 85
@@ -388,7 +457,8 @@ export function parseEngineeringReview(raw, {
       ? "PASS"
       : "RETRY";
   const reasons = Array.isArray(parsed.reasons) ? parsed.reasons.map(String).slice(0, 8) : [];
-  if (!independentModel) reasons.push("producer-reviewer-model-must-differ");
+  if (!qualityReviewerIndependent) reasons.push("producer-quality-reviewer-model-must-differ");
+  if (!blindResolutionLocked) reasons.push("blind-resolution-missing-or-changed");
   if (!independentlyResolved) reasons.push("independent-answer-or-evidence-mismatch");
   if (requestedDecision === "PASS" && !hardPass) reasons.push("hard-engineering-threshold-not-met");
   return Object.freeze({
@@ -401,6 +471,8 @@ export function parseEngineeringReview(raw, {
     reviewerModel: String(reviewerModel || ""),
     selectedOptionIndex: Number.isInteger(selectedOptionIndex) ? selectedOptionIndex : null,
     supportingEvidenceIds: Object.freeze(reviewerEvidenceIds),
+    blindReviewerModel: String(committedBlindResolution?.reviewerModel || ""),
+    blindResolutionLocked,
     independentlyResolved,
     deterministicIssues: Object.freeze([...deterministicIssues])
   });

@@ -1,9 +1,11 @@
 import {
   TR8_MAIN_IDEA_FAMILY_V1,
+  blindReviewerPrompt,
   compileCandidate,
   generatorPrompt,
   generatorSystemPrompt,
   parseEngineeringReview,
+  parseBlindResolution,
   parseGeneratedCandidate,
   reviewerPrompt,
   tr8DiversityPlan
@@ -65,14 +67,34 @@ export async function runTr8Benchmark({
         });
         const deterministicIssues = provisional.audit.errors
           .filter((issue) => issue !== "independent-verification-required");
-        const reviewer = await review({
+        const blindReviewer = await review({
           itemIndex,
           attempt,
+          stage: "blind-resolution",
           producerModel: producer.model,
-          prompt: reviewerPrompt({
+          system: "You are the independent blind assessment solver. You have not seen the author answer or rationale. Return strict JSON only.",
+          prompt: blindReviewerPrompt({
             family: TR8_MAIN_IDEA_FAMILY_V1,
             canonical: provisional.canonical,
             deterministicIssues
+          })
+        });
+        const blindResolution = parseBlindResolution(blindReviewer.content, {
+          producerModel: producer.model,
+          reviewerModel: blindReviewer.model
+        });
+        const reviewer = await review({
+          itemIndex,
+          attempt,
+          stage: "quality-audit",
+          producerModel: producer.model,
+          blindReviewerModel: blindReviewer.model,
+          system: "You are the independent assessment authoring-quality reviewer. The blind resolution is locked. Return strict JSON only.",
+          prompt: reviewerPrompt({
+            family: TR8_MAIN_IDEA_FAMILY_V1,
+            canonical: provisional.canonical,
+            deterministicIssues,
+            blindResolution
           })
         });
         const engineeringReview = parseEngineeringReview(reviewer.content, {
@@ -80,7 +102,8 @@ export async function runTr8Benchmark({
           reviewerModel: reviewer.model,
           deterministicIssues,
           expectedCorrectIndex: candidate.correctIndex,
-          requiredEvidenceIds: candidate.correctSupportEvidenceIds
+          requiredEvidenceIds: candidate.correctSupportEvidenceIds,
+          blindResolution
         });
 
         if (engineeringReview.decision === "PASS") {
@@ -90,7 +113,7 @@ export async function runTr8Benchmark({
             diversityPlan,
             proof: {
               solverId: `${TR8_MAIN_IDEA_FAMILY_V1.familyId}:annotation-solver-v1`,
-              independentVerifierId: `independent-model:${reviewer.model}`,
+              independentVerifierId: `blind-model:${blindReviewer.model}|quality-model:${reviewer.model}`,
               verified: engineeringReview.independentlyResolved
             }
           });
@@ -100,6 +123,7 @@ export async function runTr8Benchmark({
               status: "ENGINEERING_PASS",
               attempt,
               producerModel: producer.model,
+              blindReviewerModel: blindReviewer.model,
               reviewerModel: reviewer.model,
               canonical: compiled.canonical,
               audit: compiled.audit,
@@ -115,6 +139,7 @@ export async function runTr8Benchmark({
           status: engineeringReview.decision === "QUARANTINE" ? "QUARANTINED" : "RETRY_EXHAUSTED",
           attempt,
           producerModel: producer.model,
+          blindReviewerModel: blindReviewer.model,
           reviewerModel: reviewer.model,
           audit: provisional.audit,
           engineeringReview

@@ -5,6 +5,7 @@ export type BenchmarkInstance = {
   status: "ENGINEERING_PASS" | "RETRY_EXHAUSTED" | "QUARANTINED";
   attempt: number;
   producerModel?: string;
+  blindReviewerModel?: string;
   reviewerModel?: string;
   canonical?: unknown;
   audit?: { ok: boolean; errors: readonly string[]; metrics: unknown };
@@ -49,5 +50,5 @@ export function runTr8Benchmark(input: {
   morphologyNotes?: string[];
   benchmarkExcerpts?: string[];
   produce(input: { itemIndex: number; attempt: number; system: string; prompt: string }): Promise<ProviderResult>;
-  review(input: { itemIndex: number; attempt: number; producerModel: string; prompt: string }): Promise<ProviderResult>;
+  review(input: { itemIndex: number; attempt: number; stage: "blind-resolution" | "quality-audit"; producerModel: string; blindReviewerModel?: string; system: string; prompt: string }): Promise<ProviderResult>;
 }): Promise<BenchmarkResult>;

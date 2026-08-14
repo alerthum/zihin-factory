@@ -289,10 +289,10 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
             }
             return {model:String(produced.model),content:String(produced.content)};
           },
-          review: async ({itemIndex,attempt,producerModel,prompt}: {itemIndex:number;attempt:number;producerModel:string;prompt:string}) => {
-            const reviewed = await step.do(`tr8 reviewer ${itemIndex + 1}.${attempt}`, {retries:{limit:1,delay:"7 seconds",backoff:"exponential"}}, async () => {
+          review: async ({itemIndex,attempt,stage,producerModel,system,prompt}: {itemIndex:number;attempt:number;stage:"blind-resolution"|"quality-audit";producerModel:string;system:string;prompt:string}) => {
+            const reviewed = await step.do(`tr8 ${stage} ${itemIndex + 1}.${attempt}`, {retries:{limit:1,delay:"7 seconds",backoff:"exponential"}}, async () => {
               const ai = await runFactoryAI(this.env,{
-                system:"You are the independent assessment engineering reviewer. Return strict JSON only.",
+                system,
                 prompt,maxTokens:900,temperature:0,purpose:"reviewer",avoidModels:[producerModel],
                 onHeartbeat:() => providerHeartbeat(this.env.DB,jobId)
               });
@@ -310,6 +310,7 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
           status:instance?.status ?? "UNKNOWN",
           attempt:instance?.attempt ?? null,
           producerModel:instance?.producerModel ?? null,
+          blindReviewerModel:instance?.blindReviewerModel ?? null,
           reviewerModel:instance?.reviewerModel ?? null,
           automatedIssues:instance?.audit?.errors ?? [],
           engineeringDecision:instance?.engineeringReview?.decision ?? null,
