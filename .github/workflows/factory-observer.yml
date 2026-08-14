@@ -1,0 +1,76 @@
+name: Zihin Factory Observer
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  observe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Run read-only observer
+        env:
+          FACTORY_BASE_URL: https://zihin-factory-governor.alerthum.workers.dev
+          FACTORY_ADMIN_TOKEN: ${{ secrets.FACTORY_ADMIN_TOKEN }}
+          FACTORY_EXPECTED_VERSION: 0.10.1
+        run: node scripts/factory-watch.mjs
+
+      - name: Upload observer evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: factory-observer-report
+          path: factory-watch-output/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Update the single observer issue
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const title = '[WATCH] Zihin Factory evidence log';
+            const reportPath = 'factory-watch-output/report.md';
+            if (!fs.existsSync(reportPath)) {
+              core.warning('Observer report is missing; watch issue was not changed.');
+              return;
+            }
+            const report = fs.readFileSync(reportPath, 'utf8');
+            const { owner, repo } = context.repo;
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner,
+              repo,
+              state: 'open',
+              per_page: 100
+            });
+            const existing = issues.find(issue => !issue.pull_request && issue.title === title);
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: existing.number,
+                body: report
+              });
+              core.info(`Updated observer issue #${existing.number}.`);
+              return;
+            }
+            const created = await github.rest.issues.create({
+              owner,
+              repo,
+              title,
+              body: `Single durable log for the read-only factory observer.\n\n${report}`
+            });
+            core.info(`Created observer issue #${created.data.number}.`);
