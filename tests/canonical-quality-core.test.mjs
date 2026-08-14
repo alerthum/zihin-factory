@@ -6,6 +6,7 @@ import {
   defineCanonicalQuestion,
   defineHumanReviewDecision
 } from "../src/assessment/canonical-quality-core.js";
+import { buildTr8ApprovedPilotPackage } from "../src/assessment/tr8-approved-package.js";
 
 const paragraphWords = [
   "Bir araştırma grubundaki öğrenciler okul bahçesinde yetişen bitkileri haftalar boyunca gözlemledi.",
@@ -211,4 +212,55 @@ test("the batch gate detects template repetition even when identifiers differ", 
   const audit = auditTr8ParagraphBatch(questions, reviews);
   assert.equal(audit.ok, false);
   assert.equal(audit.errors.includes("exact-question-duplicate"), true);
+});
+
+function completedBenchmarkResult() {
+  return {
+    kind: "assessment.tr8-paragraph-benchmark",
+    familyId: "tr8-turkish-main-idea-v1",
+    batchId: "tr8-pilot-001",
+    sampleSize: 20,
+    status: "PENDING_HUMAN_REVIEW",
+    engineeringPassCount: 20,
+    automatedIssues: [],
+    qualityEvidence: { duplicateRate: 0, explanationEvidenceRate: 100 }
+  };
+}
+
+test("approved export contains only human-approved questions and no reviewer identity", () => {
+  const questions = Array.from({ length: 20 }, (_, index) => question(index, index % 4));
+  const reviews = questions.map((item, index) => review(item.id, index, index < 16 ? "APPROVE" : "REVISE"));
+  const packageArtifact = buildTr8ApprovedPilotPackage({
+    factoryVersion: "0.10.1",
+    jobId: "00000000-0000-4000-8000-000000000001",
+    result: completedBenchmarkResult(),
+    candidates: questions,
+    reviews,
+    exportedAt: "2026-08-14T18:00:00.000Z"
+  });
+  assert.equal(packageArtifact.releaseGate.pilotEligible, true);
+  assert.equal(packageArtifact.releaseGate.exportableQuestionCount, 16);
+  assert.equal(packageArtifact.questions.length, 16);
+  assert.equal(packageArtifact.questions.every((item) => item.contentStatus === "PILOT_READY"), true);
+  assert.equal(packageArtifact.questions.every((item) => item.content.humanReview.gameAdaptationAllowed === true), true);
+  assert.doesNotMatch(JSON.stringify(packageArtifact.reviewEvidence), /reviewer_pilot|notes/i);
+});
+
+test("two-question smoke can never become an approved export package", () => {
+  assert.throws(() => buildTr8ApprovedPilotPackage({
+    jobId: "00000000-0000-4000-8000-000000000002",
+    result: { ...completedBenchmarkResult(), sampleSize: 2, engineeringPassCount: 2 },
+    candidates: [question(0, 0), question(1, 1)],
+    reviews: []
+  }), /twenty-question-calibration-required/);
+});
+
+test("missing human coverage keeps approved export fail-closed", () => {
+  const questions = Array.from({ length: 20 }, (_, index) => question(index, index % 4));
+  assert.throws(() => buildTr8ApprovedPilotPackage({
+    jobId: "00000000-0000-4000-8000-000000000003",
+    result: completedBenchmarkResult(),
+    candidates: questions,
+    reviews: questions.slice(0, 19).map((item, index) => review(item.id, index))
+  }), /human-review-coverage/);
 });
