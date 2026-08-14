@@ -28,6 +28,8 @@ test("control issue remains the single operator page after every refresh", () =>
   assert.match(workflow, /production\/vercel/);
   assert.match(workflow, /\.github\/\*/);
   assert.match(workflow, /tests\/\*/);
+  assert.match(workflow, /KuzenlerYarisiyor Actions secrets/);
+  assert.match(workflow, /FACTORY_ADMIN_TOKEN/);
 });
 
 test("scheduled observer remains read-only toward the factory and deployment", () => {
