@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { runTr8Benchmark } from "../src/assessment/tr8-benchmark-runner.js";
 import { TR8_MAIN_IDEA_FAMILY_V1, tr8DiversityPlan } from "../src/assessment/tr8-paragraph-family.js";
 
@@ -135,4 +136,10 @@ test("runner revises at most once and then stops", async () => {
 
 test("sample size is deliberately capped at twenty", async () => {
   await assert.rejects(() => runTr8Benchmark({ sampleSize: 21, produce() {}, review() {} }), /sampleSize:must-be-1-20/);
+});
+
+test("workflow success follows the complete batch gate, not only individual pass count", () => {
+  const workflow = readFileSync(new URL("../src/workflow.ts", import.meta.url), "utf8");
+  assert.match(workflow, /ok:benchmark\.status==="PENDING_HUMAN_REVIEW"/);
+  assert.doesNotMatch(workflow, /ok:benchmark\.engineeringPassCount===benchmark\.sampleSize/);
 });

@@ -317,7 +317,7 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
           error:instance?.error ?? null
         }));
         const result = {
-          ok:benchmark.engineeringPassCount===benchmark.sampleSize,
+          ok:benchmark.status==="PENDING_HUMAN_REVIEW",
           kind:benchmark.kind,
           familyId:benchmark.familyId,
           batchId:benchmark.batchId,
