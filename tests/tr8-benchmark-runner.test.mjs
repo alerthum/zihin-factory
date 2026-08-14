@@ -90,6 +90,7 @@ test("bounded smoke batch reaches human review only after independent engineerin
   assert.equal(result.status, "PENDING_HUMAN_REVIEW");
   assert.equal(result.engineeringPassCount, 2);
   assert.equal(result.instances.every((instance) => instance.canonical.verifier.verified), true);
+  assert.equal(result.instances.every((instance) => instance.producerModel !== instance.blindReviewerModel), true);
   assert.equal(result.instances.every((instance) => instance.producerModel !== instance.reviewerModel), true);
   assert.equal(result.qualityEvidence.uniqueAnswerRate, 100);
   assert.equal(result.qualityEvidence.explanationEvidenceRate, 100);
@@ -107,7 +108,8 @@ test("same producer and reviewer model cannot certify an item", async () => {
   });
   assert.equal(result.status, "ENGINEERING_INCOMPLETE");
   assert.equal(result.engineeringPassCount, 0);
-  assert.equal(result.instances[0].engineeringReview.reasons.includes("producer-reviewer-model-must-differ"), true);
+  assert.equal(result.instances[0].engineeringReview.reasons.includes("blind-resolution-missing-or-changed"), true);
+  assert.equal(result.instances[0].engineeringReview.reasons.includes("producer-quality-reviewer-model-must-differ"), true);
 });
 
 test("runner revises at most once and then stops", async () => {
@@ -126,10 +128,13 @@ test("runner revises at most once and then stops", async () => {
     sampleSize: 1,
     maxAttempts: 2,
     produce: async () => ({ model: "producer-model", content: JSON.stringify(candidate(`retry-${++producerCalls}`)) }),
-    review: async () => ({ model: "reviewer-model", content: ++reviewerCalls === 1 ? retryReview : passingReview() })
+    review: async ({ attempt }) => {
+      reviewerCalls += 1;
+      return { model: "reviewer-model", content: attempt === 1 ? retryReview : passingReview() };
+    }
   });
   assert.equal(producerCalls, 2);
-  assert.equal(reviewerCalls, 2);
+  assert.equal(reviewerCalls, 4);
   assert.equal(result.engineeringPassCount, 1);
   assert.equal(result.instances[0].attempt, 2);
 });

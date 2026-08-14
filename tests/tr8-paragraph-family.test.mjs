@@ -2,10 +2,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   TR8_MAIN_IDEA_FAMILY_V1,
+  blindReviewerPrompt,
   compileCandidate,
   generatorPrompt,
   generatorSystemPrompt,
   parseEngineeringReview,
+  parseBlindResolution,
   parseGeneratedCandidate,
   reviewerPrompt,
   tr8DiversityPlan
@@ -127,31 +129,60 @@ test("engineering reviewer is independent and cannot override deterministic fail
     revisionInstructions: ""
   });
   const reviewContext = { expectedCorrectIndex: 0, requiredEvidenceIds: ["E2", "E3", "E4"] };
-  const sameModel = parseEngineeringReview(passingReview, { producerModel: "model-a", reviewerModel: "model-a", ...reviewContext });
+  const sameModelBlind = parseBlindResolution(passingReview, { producerModel: "model-a", reviewerModel: "model-a" });
+  const sameModel = parseEngineeringReview(passingReview, {
+    producerModel: "model-a", reviewerModel: "model-a", blindResolution: sameModelBlind, ...reviewContext
+  });
   assert.equal(sameModel.decision, "RETRY");
+  const blindResolution = parseBlindResolution(passingReview, { producerModel: "model-a", reviewerModel: "model-b" });
   const deterministicFailure = parseEngineeringReview(passingReview, {
     producerModel: "model-a",
     reviewerModel: "model-b",
     deterministicIssues: ["duplicate-options"],
+    blindResolution,
     ...reviewContext
   });
   assert.equal(deterministicFailure.decision, "RETRY");
-  const independentPass = parseEngineeringReview(passingReview, { producerModel: "model-a", reviewerModel: "model-b", ...reviewContext });
+  const independentPass = parseEngineeringReview(passingReview, {
+    producerModel: "model-a", reviewerModel: "model-b", blindResolution, ...reviewContext
+  });
   assert.equal(independentPass.decision, "PASS");
   assert.equal(independentPass.independentlyResolved, true);
+  assert.equal(independentPass.blindResolutionLocked, true);
+  const changedAfterBlind = JSON.parse(passingReview);
+  changedAfterBlind.selectedOptionIndex = 1;
+  const rejectedChangedAnswer = parseEngineeringReview(JSON.stringify(changedAfterBlind), {
+    producerModel: "model-a", reviewerModel: "model-b", blindResolution, ...reviewContext
+  });
+  assert.equal(rejectedChangedAnswer.decision, "RETRY");
+  assert.equal(rejectedChangedAnswer.reasons.includes("blind-resolution-missing-or-changed"), true);
   const cosmeticRelabel = JSON.parse(passingReview);
   cosmeticRelabel.dimensions.structuralPlanFidelity = 70;
   const rejectedRelabel = parseEngineeringReview(JSON.stringify(cosmeticRelabel), {
-    producerModel: "model-a", reviewerModel: "model-b", ...reviewContext
+    producerModel: "model-a", reviewerModel: "model-b", blindResolution, ...reviewContext
   });
   assert.equal(rejectedRelabel.decision, "RETRY");
 });
 
-test("review prompt treats prose quality as insufficient evidence", () => {
+test("blind review cannot see the authored answer, hints, feedback or solution", () => {
   const compiled = compileCandidate(candidate(), { producerModel: "producer-a", proof });
-  const prompt = reviewerPrompt({ canonical: compiled.canonical, deterministicIssues: [] });
+  const prompt = blindReviewerPrompt({ canonical: compiled.canonical, deterministicIssues: [] });
+  assert.doesNotMatch(prompt, /"answerKey"|"optionFeedback"|"solutionGraph"|"hints"/);
+  assert.match(prompt, /before seeing any author answer/i);
+  assert.match(prompt, /BLIND ITEM/);
+});
+
+test("quality review receives a locked blind resolution and treats prose as insufficient", () => {
+  const compiled = compileCandidate(candidate(), { producerModel: "producer-a", proof });
+  const blindResolution = parseBlindResolution(JSON.stringify({
+    selectedOptionIndex: 0,
+    supportingEvidenceIds: ["E2", "E3", "E4"],
+    decision: "PASS",
+    reasons: ["Blind evidence synthesis"]
+  }), { producerModel: "producer-a", reviewerModel: "reviewer-a" });
+  const prompt = reviewerPrompt({ canonical: compiled.canonical, deterministicIssues: [], blindResolution });
   assert.match(prompt, /Polished prose is not evidence/i);
-  assert.match(prompt, /unique answer defensibility/i);
-  assert.match(prompt, /actual stimulus/i);
+  assert.match(prompt, /answer defensibility/i);
+  assert.match(prompt, /LOCKED BLIND RESOLUTION/);
   assert.match(prompt, /cosmetic relabeling/i);
 });
