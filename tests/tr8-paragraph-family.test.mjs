@@ -14,10 +14,18 @@ import {
   parseEngineeringReview,
   parseBlindResolution,
   parseGeneratedCandidate,
+  parseGeneratedJsonObject,
   reviewerPrompt,
   tr8DiversityPlan,
   validateGeneratedCore
 } from "../src/assessment/tr8-paragraph-family.js";
+
+test("generated JSON parser escapes raw control characters inside model strings", () => {
+  const parsed = parseGeneratedJsonObject(`{"sentence":"Birinci satır
+ikinci satır","note":"sekme\tkarakteri"}`);
+  assert.equal(parsed.sentence, "Birinci satır\nikinci satır");
+  assert.equal(parsed.note, "sekme\tkarakteri");
+});
 
 const stimulus = [
   "Bir kent arşivinde çalışan ekip, eski mahalle fotoğraflarını yalnız tarih sırasına dizmenin değişimi açıklamadığını fark etti.",
