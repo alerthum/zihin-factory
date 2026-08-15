@@ -419,7 +419,9 @@ export function generatorCoreSystemPrompt() {
     "Return one strict JSON object only; never return a schema, template, placeholder, title-only text or commentary.",
     "Keep JSON string values on one physical line; escape any required line break instead of emitting a raw control character.",
     "Return the stimulus as exactly eight independent sentence strings in a sentences array; never assemble or return a stimulus paragraph.",
-    "Each sentence must contain 14-18 words of natural Turkish and end with exactly one sentence terminator; the factory will validate and assemble them.",
+    "Write every sentence as exactly 16 whitespace-separated words of natural Turkish; this safe target sits inside the factory's 14-18 words validation range.",
+    "Inside a sentence use no period, question mark, exclamation mark, ellipsis, abbreviation, initial, decimal or quoted question; use exactly one final period as its last character.",
+    "Silently split every sentence on whitespace and recount it; rewrite any sentence that is not exactly 16 words before returning JSON.",
     "Write exactly four distinct, plausible Turkish options of 8-16 words; only the assigned index is correct.",
     "Every option must discuss the same subject, and no option may repeat the stem.",
     "Provide exactly four concise evidence units grounded in the paragraph."
@@ -447,7 +449,8 @@ export function generatorCorePrompt({
     revision ? `revision required after a failed audit: ${revision}` : "",
     `Eight sentence assignments, in fixed order:\n${TR8_MICRO_AUTHOR_TASKS_V1.map((task, index) => `${index + 1}. ${task}`).join("\n")}`,
     "Return these JSON keys with finished Turkish content: familyId, instanceId, sentences, stem, options, correctIndex, evidenceUnits, correctSupportEvidenceIds, styleProfile.",
-    "sentences must contain exactly 8 complete Turkish sentence strings, in assignment order, with 14-18 words per string.",
+    "sentences must contain exactly 8 complete Turkish sentence strings, in assignment order, with exactly 16 whitespace-separated words per string.",
+    "Every sentence string must contain exactly one period, as its final character, and no other sentence-ending punctuation.",
     "options must contain exactly 4 strings. evidenceUnits must contain exactly 4 objects with ids E1, E2, E3, E4 and a text field.",
     "correctSupportEvidenceIds must contain at least 3 evidence ids. styleProfile must contain genre and voice.",
     "Count every sentence and option silently. Do not output counts, a combined paragraph or extra keys."
