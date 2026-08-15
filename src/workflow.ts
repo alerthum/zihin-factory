@@ -10,6 +10,7 @@ import { guidanceForError, guidanceTelegramText } from "./operations/guidance";
 import { applyProductDeterministicIssues, deterministicProductReview, productPatchDeterministicIssues, verificationManifestIssues } from "./quality/product-gates";
 import { runTr8Benchmark } from "./assessment/tr8-benchmark-runner.js";
 import {
+  assembleTr8MicroAuthorCore,
   generatorCorePrompt,
   generatorCoreSystemPrompt,
   generatorTeachingPrompt,
@@ -309,7 +310,9 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
             if (!core || typeof core !== "object" || !("model" in core) || !("content" in core)) {
               throw new Error("tr8_core_result_not_serializable");
             }
-            const coreObject = validateGeneratedCore(parseGeneratedJsonObject(String(core.content)), {diversityPlan});
+            const coreObject = validateGeneratedCore(
+              assembleTr8MicroAuthorCore(parseGeneratedJsonObject(String(core.content))), {diversityPlan}
+            );
             const teaching = await step.do(`tr8 teaching producer ${itemIndex + 1}.${attempt}`, {retries:{limit:1,delay:"7 seconds",backoff:"exponential"}}, async () => {
               const ai = await runFactoryAI(this.env,{
                 system:generatorTeachingSystemPrompt(),

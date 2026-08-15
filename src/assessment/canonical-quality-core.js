@@ -182,6 +182,7 @@ export function defineCanonicalQuestion(input = {}) {
     hints: requiredList(input.hints, "hints", 2, id),
     optionFeedback,
     misconceptionIds: requiredList(input.misconceptionIds, "misconceptionIds", 1, id),
+    instructionalMetadata: Object.freeze(structuredClone(input.instructionalMetadata || {})),
     verifier: Object.freeze({
       solverId: requiredText(input.verifier?.solverId, "verifier.solverId", id),
       independentVerifierId: requiredText(input.verifier?.independentVerifierId, "verifier.independentVerifierId", id),

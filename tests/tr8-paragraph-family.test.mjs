@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   TR8_MAIN_IDEA_FAMILY_V1,
+  assembleTr8MicroAuthorCore,
   blindReviewerPrompt,
   compileCandidate,
   generatorCorePrompt,
@@ -216,7 +217,7 @@ test("generator example satisfies every compiler array cardinality", () => {
 test("staged producer separates the real question core from the teaching payload", () => {
   const plan = tr8DiversityPlan(0);
   const corePrompt = generatorCorePrompt({ instanceId: "staged-item", diversityPlan: plan, theme: "kent belleği" });
-  assert.match(generatorCoreSystemPrompt(), /exactly 8 natural sentences/i);
+  assert.match(generatorCoreSystemPrompt(), /exactly eight independent sentence strings/i);
   assert.match(generatorCoreSystemPrompt(), /14-18 words/i);
   assert.match(corePrompt, /options.*exactly 4/i);
   assert.doesNotMatch(corePrompt, /A text|95-155 original Turkish words/);
@@ -227,6 +228,31 @@ test("staged producer separates the real question core from the teaching payload
   assert.match(generatorTeachingSystemPrompt(), /teaching layer/i);
   assert.match(teachingPrompt, /exactly 3 objects/i);
   assert.match(teachingPrompt, /at least 12 Turkish words/i);
+});
+
+test("micro-author assembler enforces eight bounded sentences and joins them deterministically", () => {
+  const sentence = "Mahalle arşivindeki belgeler geçmişte yaşanan değişimleri farklı açılardan anlamayı sağlayan önemli ipuçları bugün sunar.";
+  const core = { sentences: Array.from({ length: 8 }, () => sentence), stimulus: "model must not assemble this" };
+  const assembled = assembleTr8MicroAuthorCore(core);
+  assert.equal(assembled.stimulus, Array.from({ length: 8 }, () => sentence).join(" "));
+  assert.equal("sentences" in assembled, false);
+  assert.throws(() => assembleTr8MicroAuthorCore({ sentences: Array.from({ length: 7 }, () => sentence) }), /core-sentence-count:7/);
+  assert.throws(() => assembleTr8MicroAuthorCore({ sentences: Array.from({ length: 8 }, (_, index) => index === 3 ? "Bu cümle çok kısadır." : sentence) }), /core-sentence-4-word-count/);
+  assert.throws(() => assembleTr8MicroAuthorCore({ sentences: Array.from({ length: 8 }, (_, index) => index === 5 ? `${sentence} İkinci cümle burada.` : sentence) }), /core-sentence-6-boundary/);
+});
+
+test("canonical output preserves teaching metadata and the deterministic replay fingerprint", () => {
+  const first = compileCandidate(candidate(), { producerModel: "producer-a", proof });
+  const second = compileCandidate(candidate(), { producerModel: "producer-a", proof });
+  const metadata = first.canonical.instructionalMetadata;
+  assert.deepEqual(metadata.outcomeIds, ["tr.pre-tymm.g8.turkce.t-8-3-17"]);
+  assert.equal(metadata.thinkingSkill, "main-idea-synthesis");
+  assert.equal(metadata.cognitiveProcess, "analysis-and-synthesis");
+  assert.equal(metadata.targetDifficulty, "LGS_HIGH");
+  assert.equal(metadata.distractorStudentMisconceptions.length, 3);
+  assert.match(metadata.correctAnswerRationale, /seçenek/i);
+  assert.match(metadata.teachingExplanation, /kanıt|belge|değiş/i);
+  assert.equal(metadata.deterministicReplayFingerprint, second.canonical.instructionalMetadata.deterministicReplayFingerprint);
 });
 
 test("core preflight rejects short paragraphs before spending teaching and reviewer calls", () => {
