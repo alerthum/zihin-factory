@@ -285,14 +285,16 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
                   "meta/llama-3.3-70b-instruct",
                   "meta/llama-3.1-70b-instruct",
                   "qwen/qwen2.5-72b-instruct",
-                  "mistralai/mistral-small-3.1-24b-instruct-2503"
+                  "mistralai/mistral-small-3.1-24b-instruct-2503",
+                  "meta/llama-3.1-8b-instruct"
                 ],
                 allowedModels:[
                   "meta/llama-3.3-70b-instruct",
                   "nvidia/llama-3.3-nemotron-super-49b-v1.5",
                   "meta/llama-3.1-70b-instruct",
                   "qwen/qwen2.5-72b-instruct",
-                  "mistralai/mistral-small-3.1-24b-instruct-2503"
+                  "mistralai/mistral-small-3.1-24b-instruct-2503",
+                  "meta/llama-3.1-8b-instruct"
                 ],
                 initialResponseTimeoutMs:45_000,
                 streamIdleTimeoutMs:45_000,
