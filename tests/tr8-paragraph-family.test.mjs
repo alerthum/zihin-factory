@@ -191,3 +191,16 @@ test("quality review receives a locked blind resolution and treats prose as insu
   assert.match(prompt, /LOCKED BLIND RESOLUTION/);
   assert.match(prompt, /cosmetic relabeling/i);
 });
+
+test("generator example satisfies every compiler array cardinality", () => {
+  const plan = tr8DiversityPlan(0);
+  const prompt = generatorPrompt({ instanceId: "prompt-contract-item", diversityPlan: plan });
+  const marker = "Return exactly one JSON object with this shape:\n";
+  const example = JSON.parse(prompt.slice(prompt.indexOf(marker) + marker.length));
+  assert.equal(example.evidenceUnits.length, 4);
+  assert.equal(example.solutionSteps.length, 3);
+  assert.equal(example.hints.length, 3);
+  assert.equal(example.distractors.length, 3);
+  assert.deepEqual(example.distractors.map((item) => item.optionIndex).sort(), [1, 2, 3]);
+  assert.match(generatorSystemPrompt(), /exactly four evidenceUnits, three solutionSteps, three progressive hints, and three distractors/);
+});

@@ -306,7 +306,8 @@ export function generatorSystemPrompt() {
     "You instantiate one assessment item from an executable family; you do not freely improvise a quiz question.",
     "Return strict JSON only.",
     "Never copy benchmark wording, characters, examples or sentences.",
-    "Do not expose hidden chain-of-thought. solutionSteps are short, student-visible verification steps."
+    "Do not expose hidden chain-of-thought. solutionSteps are short, student-visible verification steps.",
+    "Do not abbreviate arrays: return exactly four evidenceUnits, three solutionSteps, three progressive hints, and three distractors."
   ].join(" ");
 }
 
@@ -319,6 +320,7 @@ export function generatorPrompt({
   revision = ""
 } = {}) {
   const plan = diversityPlan || tr8DiversityPlan(0);
+  const distractorIndices = [0, 1, 2, 3].filter((optionIndex) => optionIndex !== plan.correctIndex);
   return `EXECUTABLE FAMILY:\n${JSON.stringify(family)}\n\nMANDATORY DIVERSITY PLAN (do not substitute another template):\n${JSON.stringify(plan)}\n\nINSTANCE ID:\n${text(instanceId, "instanceId")}\n\nTHEME:\n${theme}\n\nBENCHMARK MORPHOLOGY NOTES (structure only):\n${morphologyNotes.map((note, index) => `${index + 1}. ${note}`).join("\n") || "- Multi-evidence synthesis; plausible diagnostic distractors."}\n\n${revision ? `REVISION:\n${revision}\n\n` : ""}Return exactly one JSON object with this shape:\n${JSON.stringify({
     familyId: family.familyId,
     instanceId: "batch01-item01",
@@ -327,12 +329,29 @@ export function generatorPrompt({
     stem: "natural main-idea question stem",
     options: ["A text", "B text", "C text", "D text"],
     correctIndex: plan.correctIndex,
-    evidenceUnits: [{ id: "E1", text: "concise evidence unit" }],
+    evidenceUnits: [
+      { id: "E1", text: "first concise evidence unit" },
+      { id: "E2", text: "second concise evidence unit" },
+      { id: "E3", text: "third concise evidence unit" },
+      { id: "E4", text: "fourth concise evidence unit" }
+    ],
     correctSupportEvidenceIds: ["E1", "E2", "E3"],
     correctFeedback: "why all required evidence supports the answer",
-    solutionSteps: [{ id: "s1", action: "student action", evidenceIds: ["E1"], explanation: "visible explanation" }],
-    hints: [{ text: "progressive non-revealing hint" }],
-    distractors: [{ optionIndex: 1, misconceptionId: "detail-as-main-idea", supportingEvidenceIds: ["E1"], contradictionEvidenceIds: ["E3"], feedback: "specific correction" }],
+    solutionSteps: [
+      { id: "s1", action: "identify evidence units", evidenceIds: ["E1", "E2"], explanation: "first visible verification step" },
+      { id: "s2", action: "connect the evidence", evidenceIds: ["E2", "E3"], explanation: "second visible verification step" },
+      { id: "s3", action: "check the full scope", evidenceIds: ["E1", "E2", "E3"], explanation: "third visible verification step" }
+    ],
+    hints: [
+      { text: "first progressive non-revealing hint" },
+      { text: "second progressive non-revealing hint" },
+      { text: "third progressive non-revealing hint" }
+    ],
+    distractors: [
+      { optionIndex: distractorIndices[0], misconceptionId: "detail-as-main-idea", supportingEvidenceIds: ["E1"], contradictionEvidenceIds: ["E3"], feedback: "specific correction for the detail trap" },
+      { optionIndex: distractorIndices[1], misconceptionId: "overgeneralized-main-idea", supportingEvidenceIds: ["E2"], contradictionEvidenceIds: ["E4"], feedback: "specific correction for overgeneralization" },
+      { optionIndex: distractorIndices[2], misconceptionId: "relation-reversal", supportingEvidenceIds: ["E3"], contradictionEvidenceIds: ["E1", "E2"], feedback: "specific correction for the reversed relation" }
+    ],
     styleProfile: { genre: "essay", voice: "natural" }
   })}`;
 }
