@@ -216,7 +216,8 @@ test("generator example satisfies every compiler array cardinality", () => {
 test("staged producer separates the real question core from the teaching payload", () => {
   const plan = tr8DiversityPlan(0);
   const corePrompt = generatorCorePrompt({ instanceId: "staged-item", diversityPlan: plan, theme: "kent belleği" });
-  assert.match(generatorCoreSystemPrompt(), /110-135 words/i);
+  assert.match(generatorCoreSystemPrompt(), /exactly 8 natural sentences/i);
+  assert.match(generatorCoreSystemPrompt(), /14-18 words/i);
   assert.match(corePrompt, /options.*exactly 4/i);
   assert.doesNotMatch(corePrompt, /A text|95-155 original Turkish words/);
   const teachingPrompt = generatorTeachingPrompt({

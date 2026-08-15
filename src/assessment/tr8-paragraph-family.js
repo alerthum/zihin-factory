@@ -174,7 +174,7 @@ export function validateGeneratedCore(core, { diversityPlan } = {}) {
   const stimulus = text(core?.stimulus, "core.stimulus");
   const stimulusWords = stimulus.split(/\s+/u).filter(Boolean).length;
   if (stimulusWords < 95 || stimulusWords > 155) {
-    throw new Error(`core-stimulus-word-count:${stimulusWords}; generate a new complete 110-135 word paragraph with 6-9 sentences`);
+    throw new Error(`core-stimulus-word-count:${stimulusWords}; generate a new paragraph of exactly 8 sentences with 14-18 words in every sentence`);
   }
   const options = list(core?.options, "core.options", 4).map((option, index) => text(option, `core.options.${index}`));
   if (options.length !== 4) throw new Error("core-option-count-must-be-4");
@@ -344,7 +344,7 @@ export function generatorCoreSystemPrompt() {
   return [
     "Create the core of one difficult grade-8 Turkish main-idea question.",
     "Return one strict JSON object only; never return a schema, template, placeholder, title-only text or commentary.",
-    "The stimulus must be a complete original Turkish paragraph of 110-135 words and 6-9 natural sentences.",
+    "The stimulus must be one complete original Turkish paragraph of exactly 8 natural sentences; each sentence must contain 14-18 words, yielding 112-144 words total.",
     "Write exactly four distinct, plausible Turkish options of 8-16 words; only the assigned index is correct.",
     "Every option must discuss the same subject, and no option may repeat the stem.",
     "Provide exactly four concise evidence units grounded in the paragraph."
@@ -373,7 +373,7 @@ export function generatorCorePrompt({
     "Return these JSON keys with finished Turkish content: familyId, instanceId, stimulus, stem, options, correctIndex, evidenceUnits, correctSupportEvidenceIds, styleProfile.",
     "options must contain exactly 4 strings. evidenceUnits must contain exactly 4 objects with ids E1, E2, E3, E4 and a text field.",
     "correctSupportEvidenceIds must contain at least 3 evidence ids. styleProfile must contain genre and voice.",
-    "Count the stimulus words and option words silently before returning. Do not output the count."
+    "Write exactly 8 stimulus sentences and check that every sentence has 14-18 words. Count the option words silently. Do not output any counts."
   ].filter(Boolean).join("\n");
 }
 
