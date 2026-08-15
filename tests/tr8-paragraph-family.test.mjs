@@ -27,6 +27,15 @@ ikinci satır","note":"sekme\tkarakteri"}`);
   assert.equal(parsed.note, "sekme\tkarakteri");
 });
 
+test("micro-author prompt gives the model a safe exact target inside deterministic bounds", () => {
+  const system = generatorCoreSystemPrompt();
+  const prompt = generatorCorePrompt({ instanceId: "prompt-check", diversityPlan: tr8DiversityPlan(0) });
+  assert.match(system, /exactly 16 whitespace-separated words/);
+  assert.match(system, /exactly one final period/);
+  assert.match(prompt, /exactly 16 whitespace-separated words/);
+  assert.match(prompt, /exactly one period/);
+});
+
 const stimulus = [
   "Bir kent arşivinde çalışan ekip, eski mahalle fotoğraflarını yalnız tarih sırasına dizmenin değişimi açıklamadığını fark etti.",
   "Aynı sokağın farklı yıllardaki görüntülerinde dükkân adları değişirken kapı önünde buluşma alışkanlığının sürdüğü görülüyordu.",
