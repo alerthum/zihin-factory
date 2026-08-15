@@ -298,7 +298,7 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
               const ai = await runFactoryAI(this.env,{
                 system:generatorCoreSystemPrompt(),
                 prompt:generatorCorePrompt({instanceId,diversityPlan,revision,theme,morphologyNotes}),
-                maxTokens:1050,temperature:0.2,purpose:"producer",
+                maxTokens:2000,temperature:0.2,purpose:"producer",
                 preferredModels,allowedModels:preferredModels,
                 initialResponseTimeoutMs:45_000,
                 streamIdleTimeoutMs:45_000,

@@ -176,7 +176,33 @@ export function parseGeneratedCandidate(raw) {
 
 export function parseGeneratedJsonObject(raw) {
   const objectJson = balancedObject(raw) ?? stripFences(raw);
-  const value = JSON.parse(objectJson);
+  let value;
+  try {
+    value = JSON.parse(objectJson);
+  } catch (initialError) {
+    let quoted = false;
+    let escaped = false;
+    let repaired = "";
+    for (const character of objectJson) {
+      if (quoted && !escaped) {
+        if (character === "\n") { repaired += "\\n"; continue; }
+        if (character === "\r") { repaired += "\\r"; continue; }
+        if (character === "\t") { repaired += "\\t"; continue; }
+        if (character === "\b") { repaired += "\\b"; continue; }
+        if (character === "\f") { repaired += "\\f"; continue; }
+      }
+      repaired += character;
+      if (quoted) {
+        if (escaped) escaped = false;
+        else if (character === "\\") escaped = true;
+        else if (character === '"') quoted = false;
+      } else if (character === '"') {
+        quoted = true;
+      }
+    }
+    if (repaired === objectJson) throw initialError;
+    value = JSON.parse(repaired);
+  }
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("generated-json-object-invalid");
   return value;
 }
@@ -391,6 +417,7 @@ export function generatorCoreSystemPrompt() {
   return [
     "Create the core of one difficult grade-8 Turkish main-idea question.",
     "Return one strict JSON object only; never return a schema, template, placeholder, title-only text or commentary.",
+    "Keep JSON string values on one physical line; escape any required line break instead of emitting a raw control character.",
     "Return the stimulus as exactly eight independent sentence strings in a sentences array; never assemble or return a stimulus paragraph.",
     "Each sentence must contain 14-18 words of natural Turkish and end with exactly one sentence terminator; the factory will validate and assemble them.",
     "Write exactly four distinct, plausible Turkish options of 8-16 words; only the assigned index is correct.",
