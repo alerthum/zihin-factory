@@ -6,6 +6,8 @@ import { dashboardHtml } from "./dashboard/html";
 import { guidanceForError } from "./operations/guidance";
 import { learningSummary } from "./learning/memory";
 import { maybeSendFactoryDigest } from "./notifications/digest";
+import { normalizeTr8HumanReview, summarizeTr8HumanReviews, type HumanReviewInput } from "./assessment/tr8-human-review.js";
+import { buildTr8ApprovedPilotPackage } from "./assessment/tr8-approved-package.js";
 export { FactoryWorkflow } from "./workflow";
 
 type Env = {
@@ -74,6 +76,62 @@ async function jobDetail(db: D1Database, jobId: string) {
   ).bind(jobId).all();
 
   return { job, artifacts: artifacts.results, runs: runs.results, reviews: reviews.results };
+}
+
+type Tr8HumanReviewRow = {
+  review_id:string;job_id:string;batch_id:string;question_id:string;reviewer_anon_id:string;reviewer_role:string;decision:"APPROVE"|"REVISE"|"REJECT";
+  correctness:number;option_or_rubric_quality:number;age_language_fit:number;hint_non_leakage:number;feedback_teaching_value:number;naturalness:number;
+  critical_blockers_json:string;notes:string;reviewed_at:string;
+};
+
+function humanReviewFromRow(row: Tr8HumanReviewRow): HumanReviewInput {
+  let criticalBlockers: string[] = [];
+  try { const parsed=JSON.parse(row.critical_blockers_json); if(Array.isArray(parsed)) criticalBlockers=parsed.map(String); } catch { criticalBlockers=[]; }
+  return {
+    reviewId:row.review_id,batchId:row.batch_id,questionId:row.question_id,reviewerAnonId:row.reviewer_anon_id,reviewerRole:row.reviewer_role,
+    decision:row.decision,
+    scores:{correctness:row.correctness,optionOrRubricQuality:row.option_or_rubric_quality,ageLanguageFit:row.age_language_fit,hintNonLeakage:row.hint_non_leakage,feedbackTeachingValue:row.feedback_teaching_value,naturalness:row.naturalness},
+    criticalBlockers,notes:row.notes,reviewedAt:row.reviewed_at
+  };
+}
+
+async function tr8HumanReviews(db: D1Database, jobId: string): Promise<HumanReviewInput[]> {
+  const rows = await db.prepare(
+    `SELECT review_id,job_id,batch_id,question_id,reviewer_anon_id,reviewer_role,decision,correctness,option_or_rubric_quality,age_language_fit,hint_non_leakage,feedback_teaching_value,naturalness,critical_blockers_json,notes,reviewed_at
+     FROM TR8_HUMAN_REVIEWS WHERE job_id=? ORDER BY question_id,created_at`
+  ).bind(jobId).all<Tr8HumanReviewRow>();
+  return rows.results.map(humanReviewFromRow);
+}
+
+async function tr8BenchmarkCandidates(db: D1Database, jobId: string): Promise<Record<string,unknown>[]> {
+  const artifacts = await db.prepare(
+    `SELECT metadata_json FROM ARTIFACTS WHERE job_id=? AND kind='assessment-candidate' ORDER BY created_at`
+  ).bind(jobId).all<{metadata_json:string}>();
+  const candidates: Record<string,unknown>[] = [];
+  for (const artifact of artifacts.results) {
+    try {
+      const parsed=JSON.parse(artifact.metadata_json) as {canonical?:unknown};
+      if(parsed?.canonical&&typeof parsed.canonical==="object") candidates.push(parsed.canonical as Record<string,unknown>);
+    } catch { /* malformed artifacts remain non-exportable */ }
+  }
+  return candidates;
+}
+
+async function tr8BenchmarkContext(db: D1Database, jobId: string): Promise<{jobId:string;batchId:string;questionIds:string[];result:Record<string,unknown>}|null> {
+  const job = await db.prepare(`SELECT id,job_type,result_json FROM WORK_QUEUE WHERE id=?`).bind(jobId).first<{id:string;job_type:string;result_json:string|null}>();
+  if (!job || job.job_type !== "assessment.tr8-paragraph-benchmark") return null;
+  let result: Record<string,unknown> = {};
+  try { const parsed=JSON.parse(job.result_json ?? "{}"); if(parsed&&typeof parsed==="object") result=parsed; } catch { result={}; }
+  const artifacts = await db.prepare(`SELECT metadata_json FROM ARTIFACTS WHERE job_id=? AND kind='assessment-candidate' ORDER BY created_at`).bind(jobId).all<{metadata_json:string}>();
+  const questionIds: string[] = [];
+  for (const artifact of artifacts.results) {
+    try {
+      const parsed=JSON.parse(artifact.metadata_json) as {canonical?:{id?:unknown}};
+      const questionId=String(parsed?.canonical?.id ?? "").trim();
+      if(questionId&&!questionIds.includes(questionId)) questionIds.push(questionId);
+    } catch { /* invalid artifacts cannot become human-review candidates */ }
+  }
+  return {jobId,batchId:String(result.batchId ?? jobId),questionIds,result};
 }
 
 async function dispatchJobMessage(env: Env, message: Message<unknown>, body: QueueMessage): Promise<void> {
@@ -270,6 +328,20 @@ async function factorySnapshot(db: D1Database) {
   const directorFeeds = await db.prepare(`SELECT action,COUNT(*) AS count FROM PROJECT_FEED_LOG
     WHERE datetime(created_at) >= datetime('now','-6 hours') AND action IN ('DIRECTOR_SEED','PROMOTE_RECON_TO_CODE') GROUP BY action`).all<{action:string;count:number}>();
   const learning = await learningSummary(db);
+  const latestTr8Job = await db.prepare(
+    `SELECT id FROM WORK_QUEUE WHERE job_type='assessment.tr8-paragraph-benchmark' AND status='completed' ORDER BY completed_at DESC LIMIT 1`
+  ).first<{id:string}>();
+  let itemModel: Record<string,unknown> = {humanBenchmark:{total:0,accepted:0,rate:0,expected:0,coverageRate:0,complete:false,pilotEligible:false}};
+  let qualityEvidence: unknown = null;
+  if (latestTr8Job) {
+    const context = await tr8BenchmarkContext(db,latestTr8Job.id);
+    if (context) {
+      const reviews = await tr8HumanReviews(db,latestTr8Job.id);
+      const summary = summarizeTr8HumanReviews(reviews,context.questionIds);
+      itemModel = {latestJobId:latestTr8Job.id,batchId:context.batchId,humanBenchmark:{total:summary.reviewed,accepted:summary.accepted,rate:summary.acceptanceRate,expected:summary.total,coverageRate:summary.coverageRate,complete:summary.complete,pilotEligible:summary.pilotEligible}};
+      qualityEvidence = context.result.qualityEvidence ?? null;
+    }
+  }
   const meta = await db.prepare(`SELECT key,value FROM FACTORY_META ORDER BY key`).all<{key:string;value:string}>();
   const stateMap = Object.fromEntries(state.results.map(x=>[x.key,x.value]));
   const metaMap = Object.fromEntries(meta.results.map(x=>[x.key,x.value]));
@@ -284,12 +356,12 @@ async function factorySnapshot(db: D1Database) {
   }));
 
   return {
-    version:metaMap.factory_version ?? "0.9.0",
+    version:metaMap.factory_version ?? "0.10.1",
     state:state.results,stateMap,
     queue:queue.results,roadmap:roadmapView,eligibleRoadmap,blockedReadyRoadmap,recentReviews:recentReviews.results,blockers:blockers.results,
     activeJobs,startingJobs,recentEvents:recentEvents.results,repos:repos.results,githubOperations:githubOperations.results,
     impact:impact.results,todayImpact:todayImpact.results,feedLog:feedLog.results,agents:agents.results,
-    operatorIssues,laneSummary,parallelLimit:FACTORY_MAX_PARALLEL,learning,
+    operatorIssues,laneSummary,parallelLimit:FACTORY_MAX_PARALLEL,learning,itemModel,qualityEvidence,
     last6h:{jobs:Number(last6h?.jobs??0),completed:Number(last6h?.completed??0),quarantine:Number(last6h?.quarantine??0),blocked:Number(last6h?.blocked??0),failed:Number(last6h?.failed??0),active:Number(last6h?.active??0),prs:Number(last6hPr?.total??0),prsWaiting:Number(last6hPr?.waiting??0),prsMerged:Number(last6hPr?.merged??0),directorFeeds:Object.fromEntries(directorFeeds.results.map(x=>[x.action,Number(x.count??0)]))},
     today:{completed:Number(todayRow?.completed??0),merged:Number(todayRow?.merged??0),waitingHuman:Number(todayRow?.waiting_human??0),total:Number(todayRow?.total??0)}
   };
@@ -399,6 +471,71 @@ export default {
       return detail ? json({ ok:true,...detail }) : json({ ok:false,error:"job_not_found" }, { status:404 });
     }
 
+    const tr8ReviewListMatch = url.pathname.match(/^\/admin\/tr8-benchmark\/([0-9a-f-]+)\/reviews$/i);
+    if (request.method === "GET" && tr8ReviewListMatch) {
+      const context = await tr8BenchmarkContext(env.DB,tr8ReviewListMatch[1]);
+      if (!context) return json({ok:false,error:"tr8_benchmark_job_not_found"},{status:404});
+      const reviews = await tr8HumanReviews(env.DB,context.jobId);
+      const summary = summarizeTr8HumanReviews(reviews,context.questionIds);
+      return json({ok:true,jobId:context.jobId,batchId:context.batchId,questionIds:context.questionIds,reviews,summary});
+    }
+
+    const tr8ApprovedPackageMatch = url.pathname.match(/^\/admin\/tr8-benchmark\/([0-9a-f-]+)\/approved-package$/i);
+    if (request.method === "GET" && tr8ApprovedPackageMatch) {
+      const context=await tr8BenchmarkContext(env.DB,tr8ApprovedPackageMatch[1]);
+      if(!context) return json({ok:false,error:"tr8_benchmark_job_not_found"},{status:404});
+      const [reviews,candidates,versionRow]=await Promise.all([
+        tr8HumanReviews(env.DB,context.jobId),
+        tr8BenchmarkCandidates(env.DB,context.jobId),
+        env.DB.prepare(`SELECT value FROM FACTORY_META WHERE key='factory_version'`).first<{value:string}>()
+      ]);
+      try {
+        const approvedPackage=buildTr8ApprovedPilotPackage({
+          factoryVersion:versionRow?.value ?? "unknown",jobId:context.jobId,result:context.result,candidates,reviews
+        });
+        return json({ok:true,package:approvedPackage});
+      } catch(error) {
+        return json({ok:false,error:"pilot_package_not_eligible",detail:error instanceof Error?error.message:String(error)},{status:409});
+      }
+    }
+
+    if (request.method === "POST" && url.pathname === "/admin/tr8-benchmark/review") {
+      let body: Record<string,unknown>;
+      try { const parsed=await request.json(); body=parsed&&typeof parsed==="object" ? parsed as Record<string,unknown> : {}; }
+      catch { return json({ok:false,error:"invalid_json"},{status:400}); }
+      const jobId=String(body.jobId ?? "").trim();
+      const questionId=String(body.questionId ?? "").trim();
+      if(!jobId||!questionId) return json({ok:false,error:"jobId_and_questionId_required"},{status:400});
+      const context=await tr8BenchmarkContext(env.DB,jobId);
+      if(!context) return json({ok:false,error:"tr8_benchmark_job_not_found"},{status:404});
+      if(!context.questionIds.includes(questionId)) return json({ok:false,error:"question_not_in_engineering_pass_artifacts"},{status:404});
+      let review;
+      try {
+        review=normalizeTr8HumanReview({
+          reviewId:crypto.randomUUID(),batchId:context.batchId,questionId,
+          reviewerAnonId:String(body.reviewerAnonId ?? ""),reviewerRole:String(body.reviewerRole ?? "TURKISH_TEACHER"),
+          decision:String(body.decision ?? "") as "APPROVE"|"REVISE"|"REJECT",
+          scores:body.scores as Record<string,number>,criticalBlockers:Array.isArray(body.criticalBlockers)?body.criticalBlockers.map(String):[],
+          notes:String(body.notes ?? ""),reviewedAt:new Date().toISOString()
+        });
+      } catch(error) {
+        return json({ok:false,error:"human_review_contract_failed",detail:error instanceof Error?error.message:String(error)},{status:400});
+      }
+      const duplicate=await env.DB.prepare(`SELECT review_id FROM TR8_HUMAN_REVIEWS WHERE job_id=? AND question_id=? AND reviewer_anon_id=?`).bind(jobId,questionId,review.reviewerAnonId).first<{review_id:string}>();
+      if(duplicate) return json({ok:false,error:"reviewer_already_reviewed_question",reviewId:duplicate.review_id},{status:409});
+      await env.DB.prepare(
+        `INSERT INTO TR8_HUMAN_REVIEWS(review_id,job_id,batch_id,question_id,reviewer_anon_id,reviewer_role,decision,correctness,option_or_rubric_quality,age_language_fit,hint_non_leakage,feedback_teaching_value,naturalness,critical_blockers_json,notes,reviewed_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      ).bind(
+        review.reviewId,jobId,review.batchId,review.questionId,review.reviewerAnonId,review.reviewerRole,review.decision,
+        review.scores.correctness,review.scores.optionOrRubricQuality,review.scores.ageLanguageFit,review.scores.hintNonLeakage,review.scores.feedbackTeachingValue,review.scores.naturalness,
+        JSON.stringify(review.criticalBlockers),review.notes,review.reviewedAt
+      ).run();
+      const reviews=await tr8HumanReviews(env.DB,jobId);
+      const summary=summarizeTr8HumanReviews(reviews,context.questionIds);
+      return json({ok:true,review,summary},{status:201});
+    }
+
     if (request.method === "POST" && url.pathname === "/admin/seed-roadmap") {
       const seeded = await seedRoadmap(env.DB);
       return json({ ok:true,...seeded });
@@ -475,6 +612,9 @@ export default {
         "GET /jobs (Bearer token)",
         "GET /jobs/:id (Bearer token)",
         "POST /jobs (Bearer token)",
+        "GET /admin/tr8-benchmark/:jobId/reviews (Bearer token)",
+        "GET /admin/tr8-benchmark/:jobId/approved-package (Bearer token)",
+        "POST /admin/tr8-benchmark/review (Bearer token)",
         "POST /admin/seed-roadmap (Bearer token)",
         "POST /admin/start (Bearer token)",
         "POST /admin/pause (Bearer token)",

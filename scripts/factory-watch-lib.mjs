@@ -124,7 +124,11 @@ export function evaluateFactorySnapshot({
     "duplicateRate",
     "longestCorrectRate",
     "uniqueAnswerRate",
-    "explanationEvidenceRate"
+    "explanationEvidenceRate",
+    "structuralDuplicatePairCount",
+    "distinctDiversityPlanCount",
+    "distinctDiscourseStructureCount",
+    "distinctReasoningPathCount"
   ];
   const missingQualityMetrics = requiredQualityMetrics.filter(key => quality?.[key] === undefined);
   if (missingQualityMetrics.length) {

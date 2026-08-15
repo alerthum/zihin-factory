@@ -14,7 +14,11 @@ function baseDashboard() {
       duplicateRate: 0,
       longestCorrectRate: 25,
       uniqueAnswerRate: 100,
-      explanationEvidenceRate: 100
+      explanationEvidenceRate: 100,
+      structuralDuplicatePairCount: 0,
+      distinctDiversityPlanCount: 20,
+      distinctDiscourseStructureCount: 5,
+      distinctReasoningPathCount: 4
     }
   };
 }
