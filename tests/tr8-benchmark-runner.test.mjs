@@ -167,4 +167,6 @@ test("workflow success follows the complete batch gate, not only individual pass
   assert.match(workflow, /ok:benchmark\.status==="PENDING_HUMAN_REVIEW"/);
   assert.doesNotMatch(workflow, /ok:benchmark\.engineeringPassCount===benchmark\.sampleSize/);
   assert.match(workflow, /avoidModels:\[producerModel,\.\.\.\(blindReviewerModel \? \[blindReviewerModel\] : \[\]\)\]/);
+  assert.match(workflow, /allowedModels:\[/);
+  assert.doesNotMatch(workflow.match(/purpose:"producer",[\s\S]*?onHeartbeat:/)?.[0] ?? "", /llama-3\.1-8b|nemotron-mini-4b/);
 });

@@ -98,6 +98,9 @@ test("producer instructions preserve the family and prohibit copying and hidden 
   assert.match(system, /chain-of-thought/i);
   assert.match(prompt, new RegExp(TR8_MAIN_IDEA_FAMILY_V1.familyId.replaceAll(".", "\\.")));
   assert.match(prompt, /MANDATORY DIVERSITY PLAN/);
+  assert.match(prompt, /FORBIDDEN LITERAL PLACEHOLDERS/);
+  assert.match(system, /replace every placeholder/i);
+  assert.match(system, /95-155 Turkish words/i);
 });
 
 test("compiler rejects a producer that changes its assigned structural template or answer position", () => {
@@ -195,7 +198,7 @@ test("quality review receives a locked blind resolution and treats prose as insu
 test("generator example satisfies every compiler array cardinality", () => {
   const plan = tr8DiversityPlan(0);
   const prompt = generatorPrompt({ instanceId: "prompt-contract-item", diversityPlan: plan });
-  const marker = "Return exactly one JSON object with this shape:\n";
+  const marker = "Return exactly one JSON object with this shape; replace every descriptive value with real Turkish item content:\n";
   const example = JSON.parse(prompt.slice(prompt.indexOf(marker) + marker.length));
   assert.equal(example.evidenceUnits.length, 4);
   assert.equal(example.solutionSteps.length, 3);

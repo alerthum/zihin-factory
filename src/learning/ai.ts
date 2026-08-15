@@ -4,7 +4,7 @@ import { providerRoutingHints, recordProviderAttempt } from "./memory";
 type Env={DB:D1Database;NVIDIA_API_KEY:string};
 
 export async function runFactoryAI(env:Env,input:{
-  prompt:string;system?:string;maxTokens?:number;temperature?:number;purpose?:NvidiaPurpose;avoidModels?:string[];preferredModels?:string[];onHeartbeat?:()=>Promise<void>|void;
+  prompt:string;system?:string;maxTokens?:number;temperature?:number;purpose?:NvidiaPurpose;avoidModels?:string[];preferredModels?:string[];allowedModels?:string[];onHeartbeat?:()=>Promise<void>|void;
 }):Promise<NvidiaResult>{
   const purpose=input.purpose??"producer";
   const hints=await providerRoutingHints(env.DB,purpose);

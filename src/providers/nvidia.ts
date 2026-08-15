@@ -60,9 +60,12 @@ function candidateOrder(
   ids: string[],
   purpose: NvidiaPurpose,
   avoidModels: string[],
-  preferredModels: string[] = []
+  preferredModels: string[] = [],
+  allowedModels?: string[]
 ): string[] {
   const avoid = new Set(avoidModels);
+  const allowed = allowedModels?.length ? new Set(allowedModels) : null;
+  const eligibleIds = allowed ? ids.filter((id) => allowed.has(id)) : ids;
   const preferred = purpose === "reviewer"
     ? REVIEWER_MODELS
     : purpose === "coder"
@@ -71,15 +74,15 @@ function candidateOrder(
 
   const ordered: string[] = [];
   for (const model of preferredModels) {
-    if (ids.includes(model) && !avoid.has(model) && !ordered.includes(model)) ordered.push(model);
+    if (eligibleIds.includes(model) && !avoid.has(model) && !ordered.includes(model)) ordered.push(model);
   }
   for (const model of preferred) {
-    if (ids.includes(model) && !avoid.has(model) && !ordered.includes(model)) ordered.push(model);
+    if (eligibleIds.includes(model) && !avoid.has(model) && !ordered.includes(model)) ordered.push(model);
   }
 
   // Prefer smaller model names before arbitrary large fallbacks when the
   // preferred list is not available.
-  const dynamic = ids
+  const dynamic = eligibleIds
     .filter(id => !avoid.has(id) && isTextModel(id) && !ordered.includes(id))
     .sort((a, b) => {
       const size = (x: string) => {
@@ -91,7 +94,7 @@ function candidateOrder(
   ordered.push(...dynamic);
 
   if (ordered.length === 0) {
-    ordered.push(...ids.filter(id => !avoid.has(id) && isTextModel(id)));
+    ordered.push(...eligibleIds.filter(id => !avoid.has(id) && isTextModel(id)));
   }
 
   return ordered;
@@ -245,13 +248,20 @@ export async function runNvidiaText(
     purpose?: NvidiaPurpose;
     avoidModels?: string[];
     preferredModels?: string[];
+    allowedModels?: string[];
     onHeartbeat?: () => Promise<void> | void;
     onAttempt?: (event: ProviderAttemptEvent) => Promise<void> | void;
   }
 ): Promise<NvidiaResult> {
   try { await input.onHeartbeat?.(); } catch { /* heartbeat is best effort */ }
   const ids = await listModels(env);
-  const candidates = candidateOrder(ids, input.purpose ?? "producer", input.avoidModels ?? [], input.preferredModels ?? []);
+  const candidates = candidateOrder(
+    ids,
+    input.purpose ?? "producer",
+    input.avoidModels ?? [],
+    input.preferredModels ?? [],
+    input.allowedModels
+  );
 
   if (candidates.length === 0) {
     throw new Error("NVIDIA provider cooldown: no healthy text-generation model is currently eligible; automatic retry required.");

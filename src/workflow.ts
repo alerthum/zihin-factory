@@ -280,6 +280,20 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
             const produced = await step.do(`tr8 producer ${itemIndex + 1}.${attempt}`, {retries:{limit:1,delay:"7 seconds",backoff:"exponential"}}, async () => {
               const ai = await runFactoryAI(this.env,{
                 system,prompt,maxTokens:1200,temperature:0.18,purpose:"producer",
+                preferredModels:[
+                  "meta/llama-3.3-70b-instruct",
+                  "nvidia/llama-3.3-nemotron-super-49b-v1.5",
+                  "meta/llama-3.1-70b-instruct",
+                  "qwen/qwen2.5-72b-instruct",
+                  "mistralai/mistral-small-3.1-24b-instruct-2503"
+                ],
+                allowedModels:[
+                  "meta/llama-3.3-70b-instruct",
+                  "nvidia/llama-3.3-nemotron-super-49b-v1.5",
+                  "meta/llama-3.1-70b-instruct",
+                  "qwen/qwen2.5-72b-instruct",
+                  "mistralai/mistral-small-3.1-24b-instruct-2503"
+                ],
                 onHeartbeat:() => providerHeartbeat(this.env.DB,jobId)
               });
               return {model:ai.model,content:ai.content};

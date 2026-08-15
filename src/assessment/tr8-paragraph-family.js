@@ -307,7 +307,9 @@ export function generatorSystemPrompt() {
     "Return strict JSON only.",
     "Never copy benchmark wording, characters, examples or sentences.",
     "Do not expose hidden chain-of-thought. solutionSteps are short, student-visible verification steps.",
-    "Do not abbreviate arrays: return exactly four evidenceUnits, three solutionSteps, three progressive hints, and three distractors."
+    "Do not abbreviate arrays: return exactly four evidenceUnits, three solutionSteps, three progressive hints, and three distractors.",
+    "Every descriptive string in the JSON shape is a placeholder, not content: replace every placeholder with original, natural Turkish content.",
+    "Before returning, verify that stimulus has 95-155 Turkish words, every option has 7-18 words, and no placeholder phrase remains."
   ].join(" ");
 }
 
@@ -321,7 +323,7 @@ export function generatorPrompt({
 } = {}) {
   const plan = diversityPlan || tr8DiversityPlan(0);
   const distractorIndices = [0, 1, 2, 3].filter((optionIndex) => optionIndex !== plan.correctIndex);
-  return `EXECUTABLE FAMILY:\n${JSON.stringify(family)}\n\nMANDATORY DIVERSITY PLAN (do not substitute another template):\n${JSON.stringify(plan)}\n\nINSTANCE ID:\n${text(instanceId, "instanceId")}\n\nTHEME:\n${theme}\n\nBENCHMARK MORPHOLOGY NOTES (structure only):\n${morphologyNotes.map((note, index) => `${index + 1}. ${note}`).join("\n") || "- Multi-evidence synthesis; plausible diagnostic distractors."}\n\n${revision ? `REVISION:\n${revision}\n\n` : ""}Return exactly one JSON object with this shape:\n${JSON.stringify({
+  return `EXECUTABLE FAMILY:\n${JSON.stringify(family)}\n\nMANDATORY DIVERSITY PLAN (do not substitute another template):\n${JSON.stringify(plan)}\n\nINSTANCE ID:\n${text(instanceId, "instanceId")}\n\nTHEME:\n${theme}\n\nBENCHMARK MORPHOLOGY NOTES (structure only):\n${morphologyNotes.map((note, index) => `${index + 1}. ${note}`).join("\n") || "- Multi-evidence synthesis; plausible diagnostic distractors."}\n\nFORBIDDEN LITERAL PLACEHOLDERS (none may appear in your output):\n- 95-155 original Turkish words\n- natural main-idea question stem\n- A text / B text / C text / D text\n- first concise evidence unit / second concise evidence unit / third concise evidence unit / fourth concise evidence unit\n- first visible verification step / second visible verification step / third visible verification step\n- first progressive non-revealing hint / second progressive non-revealing hint / third progressive non-revealing hint\n\n${revision ? `REVISION:\n${revision}\n\n` : ""}Return exactly one JSON object with this shape; replace every descriptive value with real Turkish item content:\n${JSON.stringify({
     familyId: family.familyId,
     instanceId: "batch01-item01",
     diversityPlan: plan,
