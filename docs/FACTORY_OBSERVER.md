@@ -12,11 +12,14 @@ certify, deploy, merge, or modify factory work.
 3. Run `Zihin Factory Observer` manually with `workflow_dispatch`.
 4. Review `report.md`, `report.json`, and the GitHub Actions step summary.
 5. Correct false alarms and repeat the manual run.
-6. Only after successful manual verification, add a three-hour schedule.
-7. GitHub Actions creates or updates one durable watch issue with its scoped
-   `GITHUB_TOKEN`. Configure Codex Web to read that evidence and report a
-   diagnosis in Scheduled. Codex must not modify GitHub or code during
-   observer runs.
+6. After successful manual verification, enable the three-hour schedule.
+7. GitHub Actions refreshes one durable watch issue with its scoped
+   `GITHUB_TOKEN`. This issue is the single operator-facing control center:
+   it shows the latest verified report and links to deeper diagnostics.
+   Historical evidence stays in workflow runs and 14-day artifacts rather
+   than accumulating as issue comments.
+8. Configure Codex Web to read that evidence and report a diagnosis in
+   Scheduled. Codex must not modify GitHub or code during observer runs.
 
 ## Evidence contract
 
@@ -39,6 +42,10 @@ It does not treat a completed workflow, an AI reviewer score, or an internally
 set approval flag as proof of question quality.
 
 ## Codex Web observer prompt
+
+The GitHub Observer runs every three hours even when the local computer is
+off. Codex Web is an optional reasoning layer on top of the durable control
+center; it is not responsible for triggering the Observer.
 
 Use a standalone scheduled task only after the manual workflow is proven:
 

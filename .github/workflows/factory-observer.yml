@@ -2,6 +2,13 @@ name: Zihin Factory Observer
 
 on:
   workflow_dispatch:
+  schedule:
+    # GitHub cron uses UTC. This runs every three hours at :17.
+    - cron: "17 */3 * * *"
+
+concurrency:
+  group: zihin-factory-observer
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -18,7 +25,7 @@ jobs:
       - name: Use Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
 
       - name: Run read-only observer
         env:
@@ -50,6 +57,7 @@ jobs:
             }
             const report = fs.readFileSync(reportPath, 'utf8');
             const { owner, repo } = context.repo;
+            const runUrl = `https://github.com/${owner}/${repo}/actions/runs/${context.runId}`;
             const issues = await github.paginate(github.rest.issues.listForRepo, {
               owner,
               repo,
@@ -57,20 +65,102 @@ jobs:
               per_page: 100
             });
             const existing = issues.find(issue => !issue.pull_request && issue.title === title);
+            const pulls = await github.paginate(github.rest.pulls.list, {
+              owner,
+              repo,
+              state: 'open',
+              per_page: 100
+            });
+            const activeDrafts = pulls
+              .filter(pull => pull.draft)
+              .sort((left, right) => left.number - right.number)
+              .map(pull => `- [#${pull.number} — ${pull.title}](${pull.html_url}) · base: \`${pull.base.ref}\``)
+              .join('\n') || '- Açık fabrika taslak PR’ı yok.';
+            let latestSmoke = '_Henüz iki soruluk smoke sonucu yok._';
+            let latestCalibration = '_Henüz 20 soruluk calibration sonucu yok._';
             if (existing) {
-              await github.rest.issues.createComment({
+              const comments = await github.paginate(github.rest.issues.listComments, {
                 owner,
                 repo,
                 issue_number: existing.number,
-                body: report
+                per_page: 100
               });
-              core.info(`Updated observer issue #${existing.number}.`);
+              const smokeComment = [...comments].reverse().find(comment =>
+                String(comment.body || '').includes('## 8. sınıf Türkçe · 2 soruluk smoke'));
+              if (smokeComment) latestSmoke = `${smokeComment.body}\n\n[Smoke yorum kaydı](${smokeComment.html_url})`;
+              const calibrationComment = [...comments].reverse().find(comment =>
+                String(comment.body || '').includes('## 8. sınıf Türkçe · 20 soruluk calibration'));
+              if (calibrationComment) latestCalibration = `${calibrationComment.body}\n\n[Calibration yorum kaydı](${calibrationComment.html_url})`;
+            }
+            const controlCenter = `# Zihin Factory — Tek Kontrol Merkezi
+
+            Bu kayıt, salt okunur Observer tarafından üç saatte bir yenilenir. Normal kontrolde yalnız bu sayfaya bakmanız yeterlidir.
+
+            ## Günlük izlenecek üç kayıt
+
+            1. [Observer zamanlaması — Factory PR #4](https://github.com/${owner}/${repo}/pull/4)
+            2. [Tek fabrika teslimat adayı — Factory PR #12](https://github.com/${owner}/${repo}/pull/12)
+            3. [Tek oyun entegrasyon adayı — KuzenlerYarisiyor PR #2](https://github.com/alerthum/KuzenlerYarisiyor/pull/2)
+
+            Aşağıdaki diğer taslaklar teknik inceleme ve kanıt katmanıdır; günlük olarak takip edilmeleri gerekmez.
+
+            ## 8. sınıf Türkçe kalite zinciri
+
+            Pilot yalnız üretici, cevap anahtarı/ipuçları/geri bildirim/çözümü görmeden soruyu çözen kör değerlendirici ve son kalite denetçisi üç farklı model olduğunda ilerler. Son kalite denetçisi kilitli kör cevabı değiştiremez. Smoke, 20 soruluk calibration, insan onaylı export ve KuzenlerYarisiyor importer'ı her soru için bu kanıtı fail-closed olarak zorunlu tutar.
+
+            İki soruluk smoke geçse bile calibration kendiliğinden açılmaz: iki sorunun ikisi de insan tarafından incelenmeli, altı kalite boyutunda en az 4/5 almalı ve APPROVE edilmelidir. Onaylı ürün adaptörü üç aşamalı ipucunun tamamını, kanıtlı çözüm adımlarını ve dört şıkkın gerekçesini öğrencinin gerçek cevap-sonrası ekranına taşır.
+
+            Kod testlerinin geçmesi gerçek soru kalitesinin kanıtlandığı anlamına gelmez; gerçek smoke, calibration ve 20/20 insan incelemesi tamamlanana kadar pilot canlıya alınmaz.
+
+            ## Merge öncesi production koruması
+
+            > [!CAUTION]
+            > Cloudflare production branch `production/cloudflare` ve Vercel Production Branch Tracking `production/vercel` olarak doğrulanmadan hiçbir PR `main` dalına alınmamalıdır. Cloudflare Build watch Exclude paths alanında ayrıca `.github/*` ve `tests/*` bulunmalıdır.
+
+            Tam onaylı paketin bilgisayar kapalıyken ürün PR'ına dönüşebilmesi için KuzenlerYarisiyor Actions secrets içinde `FACTORY_ADMIN_TOKEN` da bulunmalıdır. Bu secret yalnız korumalı approved-package yolunu okumak için kullanılır.
+            KuzenlerYarisiyor Actions → General altında ayrıca `Read and write permissions` ile `Allow GitHub Actions to create and approve pull requests` etkin olmalıdır; aksi halde workflow kaliteyi doğrulasa bile taslak içerik PR'ı açamaz.
+
+            ## Hızlı bağlantılar
+
+            - [Canlı fabrika paneli](https://zihin-factory-governor.alerthum.workers.dev/dashboard) — yalnız ayrıntılı teşhis için
+            - [Bu Observer çalışması](${runUrl}) — teknik kayıt ve indirilebilir kanıt
+            - [Fabrika taslak PR'ları](https://github.com/${owner}/${repo}/pulls)
+            - [Ana ürün taslak PR'ları](https://github.com/alerthum/KuzenlerYarisiyor/pulls)
+
+            ## Aktif fabrika taslakları
+
+            ${activeDrafts}
+
+            ## Son 8. sınıf Türkçe smoke sonucu
+
+            ${latestSmoke}
+
+            ## Son 8. sınıf Türkçe calibration sonucu
+
+            ${latestCalibration}
+
+            ## Son doğrulanmış durum
+
+            ${report}
+
+            ## Güvenlik sınırı
+
+            Observer yalnız okur ve raporlar. Fabrikayı başlatmaz, durdurmaz, işi yeniden denemez, kodu birleştirmez ve production deploy yapmaz.
+            `;
+            if (existing) {
+              await github.rest.issues.update({
+                owner,
+                repo,
+                issue_number: existing.number,
+                body: controlCenter
+              });
+              core.info(`Refreshed control center issue #${existing.number}.`);
               return;
             }
             const created = await github.rest.issues.create({
               owner,
               repo,
               title,
-              body: `Single durable log for the read-only factory observer.\n\n${report}`
+              body: controlCenter
             });
             core.info(`Created observer issue #${created.data.number}.`);
