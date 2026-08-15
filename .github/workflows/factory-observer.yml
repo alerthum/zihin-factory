@@ -115,10 +115,10 @@ jobs:
             ## Merge öncesi production koruması
 
             > [!CAUTION]
-            > Cloudflare production branch `production/cloudflare` ve Vercel Production Branch Tracking `production/vercel` olarak doğrulanmadan hiçbir PR `main` dalına alınmamalıdır. Cloudflare Build watch Exclude paths alanında ayrıca `.github/*` ve `tests/*` bulunmalıdır.
+            > Cloudflare production branch **production/cloudflare** ve Vercel Production Branch Tracking **production/vercel** olarak doğrulanmadan hiçbir PR **main** dalına alınmamalıdır. Cloudflare Build watch Exclude paths alanında ayrıca **.github/*** ve **tests/*** bulunmalıdır.
 
-            Tam onaylı paketin bilgisayar kapalıyken ürün PR'ına dönüşebilmesi için KuzenlerYarisiyor Actions secrets içinde `FACTORY_ADMIN_TOKEN` da bulunmalıdır. Bu secret yalnız korumalı approved-package yolunu okumak için kullanılır.
-            KuzenlerYarisiyor Actions → General altında ayrıca `Read and write permissions` ile `Allow GitHub Actions to create and approve pull requests` etkin olmalıdır; aksi halde workflow kaliteyi doğrulasa bile taslak içerik PR'ı açamaz.
+            Tam onaylı paketin bilgisayar kapalıyken ürün PR'ına dönüşebilmesi için KuzenlerYarisiyor Actions secrets içinde **FACTORY_ADMIN_TOKEN** da bulunmalıdır. Bu secret yalnız korumalı approved-package yolunu okumak için kullanılır.
+            KuzenlerYarisiyor Actions → General altında ayrıca **Read and write permissions** ile **Allow GitHub Actions to create and approve pull requests** etkin olmalıdır; aksi halde workflow kaliteyi doğrulasa bile taslak içerik PR'ı açamaz.
 
             ## Hızlı bağlantılar
 

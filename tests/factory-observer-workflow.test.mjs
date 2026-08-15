@@ -46,3 +46,17 @@ test("scheduled observer remains read-only toward the factory and deployment", (
   assert.doesNotMatch(workflow, /fetch\([^)]*\/jobs|\/admin\/start|\/admin\/cycle/);
   assert.match(workflow, /permissions:\s*\n\s*contents: read\s*\n\s*issues: write/);
 });
+
+test("embedded GitHub script is valid JavaScript", () => {
+  const normalized = workflow.replace(/\r\n/g, "\n");
+  const marker = "          script: |\n";
+  const start = normalized.indexOf(marker);
+  assert.notEqual(start, -1);
+  const embedded = normalized
+    .slice(start + marker.length)
+    .split("\n")
+    .map((line) => line.startsWith("            ") ? line.slice(12) : line)
+    .join("\n");
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  assert.doesNotThrow(() => new AsyncFunction("github", "context", "core", "require", embedded));
+});
