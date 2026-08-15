@@ -128,6 +128,28 @@ test("engineering shortfall keeps the smoke and twenty-question calibration clos
   }), /engineering-pass-not-two/);
 });
 
+test("engineering failure reports bounded per-instance diagnostics", async () => {
+  const unsafe = completedDetail({ engineeringPassCount: 1, status: "ENGINEERING_INCOMPLETE" });
+  const result = JSON.parse(unsafe.job.result_json);
+  result.instances[0] = {
+    instanceId: "smoke-item-1",
+    status: "RETRY_EXHAUSTED",
+    attempt: 2,
+    error: "micro-author-sentence-1-word-count:13",
+    automatedIssues: ["canonical-missing"]
+  };
+  unsafe.job.result_json = JSON.stringify(result);
+  const replies = [
+    response(200, { ok: true, version: "0.10.1" }),
+    response(202, { ok: true, jobId: "00000000-0000-4000-8000-000000000047" }),
+    response(200, unsafe)
+  ];
+  await assert.rejects(() => runTr8Smoke({
+    baseUrl: "https://factory.example", token: "secret", runId: "47",
+    fetchImpl: async () => replies.shift(), sleep: async () => {}, maxPolls: 1
+  }), /diagnostics=.*micro-author-sentence-1-word-count:13/);
+});
+
 test("old live factory version is rejected before a smoke job can be created", async () => {
   const calls = [];
   await assert.rejects(() => runTr8Smoke({

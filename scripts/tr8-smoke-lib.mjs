@@ -83,7 +83,19 @@ export function validateCompletedSmoke(detail) {
       || !question.styleProfile?.genreId) errors.push(`canonical-structural-plan:${question.id ?? "unknown"}`);
   }
   if (new Set(canonicalQuestions.map((question) => question.id)).size !== canonicalQuestions.length) errors.push("duplicate-canonical-id");
-  if (errors.length) throw new Error(`tr8-smoke-failed:${[...new Set(errors)].join(",")}`);
+  if (errors.length) {
+    const diagnostics = (Array.isArray(result?.instances) ? result.instances : []).map((instance) => ({
+      instanceId: String(instance?.instanceId ?? "unknown"),
+      status: String(instance?.status ?? "UNKNOWN"),
+      attempt: Number.isInteger(instance?.attempt) ? instance.attempt : null,
+      error: String(instance?.error ?? "").slice(0, 500),
+      engineeringDecision: instance?.engineeringDecision ?? null,
+      automatedIssues: Array.isArray(instance?.automatedIssues)
+        ? instance.automatedIssues.map(String).slice(0, 20)
+        : []
+    }));
+    throw new Error(`tr8-smoke-failed:${[...new Set(errors)].join(",")};diagnostics=${JSON.stringify(diagnostics)}`);
+  }
   return { result, canonicalQuestions };
 }
 
