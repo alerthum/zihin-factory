@@ -169,6 +169,7 @@ test("workflow success follows the complete batch gate, not only individual pass
   assert.match(workflow, /avoidModels:\[producerModel,\.\.\.\(blindReviewerModel \? \[blindReviewerModel\] : \[\]\)\]/);
   assert.match(workflow, /allowedModels:\[/);
   assert.match(workflow, /tr8 core producer/);
+  assert.match(workflow, /tr8 core repair/);
   assert.match(workflow, /tr8 teaching producer/);
   assert.match(workflow, /maxTokens:2000/);
   assert.match(workflow, /maxTokens:1300/);
