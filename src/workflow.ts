@@ -14,7 +14,8 @@ import {
   generatorCoreSystemPrompt,
   generatorTeachingPrompt,
   generatorTeachingSystemPrompt,
-  parseGeneratedJsonObject
+  parseGeneratedJsonObject,
+  validateGeneratedCore
 } from "./assessment/tr8-paragraph-family.js";
 
 export type FactoryJobParams = { jobId: string };
@@ -308,12 +309,12 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
             if (!core || typeof core !== "object" || !("model" in core) || !("content" in core)) {
               throw new Error("tr8_core_result_not_serializable");
             }
-            const coreObject = parseGeneratedJsonObject(String(core.content));
+            const coreObject = validateGeneratedCore(parseGeneratedJsonObject(String(core.content)), {diversityPlan});
             const teaching = await step.do(`tr8 teaching producer ${itemIndex + 1}.${attempt}`, {retries:{limit:1,delay:"7 seconds",backoff:"exponential"}}, async () => {
               const ai = await runFactoryAI(this.env,{
                 system:generatorTeachingSystemPrompt(),
                 prompt:generatorTeachingPrompt({core:coreObject,diversityPlan}),
-                maxTokens:1000,temperature:0.12,purpose:"producer",
+                maxTokens:1300,temperature:0.12,purpose:"producer",
                 preferredModels:[String(core.model)],allowedModels:[String(core.model)],
                 initialResponseTimeoutMs:45_000,
                 streamIdleTimeoutMs:45_000,
@@ -345,10 +346,15 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
           },
           review: async ({itemIndex,attempt,stage,producerModel,blindReviewerModel,system,prompt}: {itemIndex:number;attempt:number;stage:"blind-resolution"|"quality-audit";producerModel:string;blindReviewerModel?:string;system:string;prompt:string}) => {
             const reviewed = await step.do(`tr8 ${stage} ${itemIndex + 1}.${attempt}`, {retries:{limit:1,delay:"7 seconds",backoff:"exponential"}}, async () => {
+              const reviewerModels = stage === "blind-resolution"
+                ? ["nvidia/nemotron-mini-4b-instruct","meta/llama-3.1-70b-instruct","meta/llama-3.3-70b-instruct"]
+                : ["meta/llama-3.1-70b-instruct","meta/llama-3.3-70b-instruct","nvidia/llama-3.3-nemotron-super-49b-v1.5"];
               const ai = await runFactoryAI(this.env,{
                 system,
                 prompt,maxTokens:900,temperature:0,purpose:"reviewer",
                 avoidModels:[producerModel,...(blindReviewerModel ? [blindReviewerModel] : [])],
+                preferredModels:reviewerModels,
+                allowedModels:reviewerModels,
                 initialResponseTimeoutMs:45_000,
                 streamIdleTimeoutMs:45_000,
                 streamTotalTimeoutMs:120_000,

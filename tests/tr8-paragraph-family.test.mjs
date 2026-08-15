@@ -14,7 +14,8 @@ import {
   parseBlindResolution,
   parseGeneratedCandidate,
   reviewerPrompt,
-  tr8DiversityPlan
+  tr8DiversityPlan,
+  validateGeneratedCore
 } from "../src/assessment/tr8-paragraph-family.js";
 
 const stimulus = [
@@ -225,4 +226,13 @@ test("staged producer separates the real question core from the teaching payload
   assert.match(generatorTeachingSystemPrompt(), /teaching layer/i);
   assert.match(teachingPrompt, /exactly 3 objects/i);
   assert.match(teachingPrompt, /at least 12 Turkish words/i);
+});
+
+test("core preflight rejects short paragraphs before spending teaching and reviewer calls", () => {
+  assert.throws(() => validateGeneratedCore({
+    stimulus: "Bu metin bilinçli olarak çok kısadır.",
+    options: ["A seçeneği yeterli sayıda sözcük içerir ve konuya bağlıdır.", "B seçeneği yeterli sayıda sözcük içerir ve konuya bağlıdır.", "C seçeneği yeterli sayıda sözcük içerir ve konuya bağlıdır.", "D seçeneği yeterli sayıda sözcük içerir ve konuya bağlıdır."],
+    correctIndex: 0,
+    evidenceUnits: [{id:"E1",text:"a"},{id:"E2",text:"b"},{id:"E3",text:"c"},{id:"E4",text:"d"}]
+  }, { diversityPlan: tr8DiversityPlan(0) }), /core-stimulus-word-count/);
 });

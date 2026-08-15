@@ -170,6 +170,27 @@ export function parseGeneratedJsonObject(raw) {
   return value;
 }
 
+export function validateGeneratedCore(core, { diversityPlan } = {}) {
+  const stimulus = text(core?.stimulus, "core.stimulus");
+  const stimulusWords = stimulus.split(/\s+/u).filter(Boolean).length;
+  if (stimulusWords < 95 || stimulusWords > 155) {
+    throw new Error(`core-stimulus-word-count:${stimulusWords}; generate a new complete 110-135 word paragraph with 6-9 sentences`);
+  }
+  const options = list(core?.options, "core.options", 4).map((option, index) => text(option, `core.options.${index}`));
+  if (options.length !== 4) throw new Error("core-option-count-must-be-4");
+  const normalizedOptions = options.map((option) => option.toLocaleLowerCase("tr-TR").replace(/[^a-z0-9çğıöşü]+/giu, " ").trim());
+  if (new Set(normalizedOptions).size !== 4) throw new Error("core-options-must-be-distinct");
+  const optionCounts = options.map((option) => option.split(/\s+/u).filter(Boolean).length);
+  if (optionCounts.some((count) => count < 7 || count > 18)) {
+    throw new Error(`core-option-word-counts:${optionCounts.join(",")}; every option must contain 7-18 words`);
+  }
+  const plan = diversityPlan || tr8DiversityPlan(0);
+  if (Number(core?.correctIndex) !== plan.correctIndex) throw new Error(`core-correct-index-must-be:${plan.correctIndex}`);
+  const evidenceUnits = list(core?.evidenceUnits, "core.evidenceUnits", 4);
+  if (evidenceUnits.length !== 4) throw new Error("core-evidence-unit-count-must-be-4");
+  return core;
+}
+
 export function compileCandidate(candidate, {
   family = TR8_MAIN_IDEA_FAMILY_V1,
   producerModel,
