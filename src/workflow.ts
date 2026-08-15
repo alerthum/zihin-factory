@@ -9,6 +9,13 @@ import { candidateRepoPaths, parsePathSelection, parseAndApplyPatchProposal, pat
 import { guidanceForError, guidanceTelegramText } from "./operations/guidance";
 import { applyProductDeterministicIssues, deterministicProductReview, productPatchDeterministicIssues, verificationManifestIssues } from "./quality/product-gates";
 import { runTr8Benchmark } from "./assessment/tr8-benchmark-runner.js";
+import {
+  generatorCorePrompt,
+  generatorCoreSystemPrompt,
+  generatorTeachingPrompt,
+  generatorTeachingSystemPrompt,
+  parseGeneratedJsonObject
+} from "./assessment/tr8-paragraph-family.js";
 
 export type FactoryJobParams = { jobId: string };
 
@@ -276,26 +283,21 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
           themes,
           morphologyNotes,
           benchmarkExcerpts,
-          produce: async ({itemIndex,attempt,system,prompt}: {itemIndex:number;attempt:number;system:string;prompt:string}) => {
-            const produced = await step.do(`tr8 producer ${itemIndex + 1}.${attempt}`, {retries:{limit:1,delay:"7 seconds",backoff:"exponential"}}, async () => {
+          produce: async ({itemIndex,attempt,instanceId,diversityPlan,revision,theme,morphologyNotes}: {itemIndex:number;attempt:number;instanceId:string;diversityPlan:Record<string,unknown>;revision:string;theme?:string;morphologyNotes:string[]}) => {
+            const preferredModels = [
+              "nvidia/llama-3.3-nemotron-super-49b-v1.5",
+              "meta/llama-3.3-70b-instruct",
+              "meta/llama-3.1-70b-instruct",
+              "qwen/qwen2.5-72b-instruct",
+              "mistralai/mistral-small-3.1-24b-instruct-2503",
+              "meta/llama-3.1-8b-instruct"
+            ];
+            const core = await step.do(`tr8 core producer ${itemIndex + 1}.${attempt}`, {retries:{limit:1,delay:"7 seconds",backoff:"exponential"}}, async () => {
               const ai = await runFactoryAI(this.env,{
-                system,prompt,maxTokens:1600,temperature:0.18,purpose:"producer",
-                preferredModels:[
-                  "nvidia/llama-3.3-nemotron-super-49b-v1.5",
-                  "meta/llama-3.3-70b-instruct",
-                  "meta/llama-3.1-70b-instruct",
-                  "qwen/qwen2.5-72b-instruct",
-                  "mistralai/mistral-small-3.1-24b-instruct-2503",
-                  "meta/llama-3.1-8b-instruct"
-                ],
-                allowedModels:[
-                  "meta/llama-3.3-70b-instruct",
-                  "nvidia/llama-3.3-nemotron-super-49b-v1.5",
-                  "meta/llama-3.1-70b-instruct",
-                  "qwen/qwen2.5-72b-instruct",
-                  "mistralai/mistral-small-3.1-24b-instruct-2503",
-                  "meta/llama-3.1-8b-instruct"
-                ],
+                system:generatorCoreSystemPrompt(),
+                prompt:generatorCorePrompt({instanceId,diversityPlan,revision,theme,morphologyNotes}),
+                maxTokens:1050,temperature:0.2,purpose:"producer",
+                preferredModels,allowedModels:preferredModels,
                 initialResponseTimeoutMs:45_000,
                 streamIdleTimeoutMs:45_000,
                 streamTotalTimeoutMs:150_000,
@@ -303,10 +305,43 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
               });
               return {model:ai.model,content:ai.content};
             });
-            if (!produced || typeof produced !== "object" || !("model" in produced) || !("content" in produced)) {
-              throw new Error("tr8_producer_result_not_serializable");
+            if (!core || typeof core !== "object" || !("model" in core) || !("content" in core)) {
+              throw new Error("tr8_core_result_not_serializable");
             }
-            return {model:String(produced.model),content:String(produced.content)};
+            const coreObject = parseGeneratedJsonObject(String(core.content));
+            const teaching = await step.do(`tr8 teaching producer ${itemIndex + 1}.${attempt}`, {retries:{limit:1,delay:"7 seconds",backoff:"exponential"}}, async () => {
+              const ai = await runFactoryAI(this.env,{
+                system:generatorTeachingSystemPrompt(),
+                prompt:generatorTeachingPrompt({core:coreObject,diversityPlan}),
+                maxTokens:1000,temperature:0.12,purpose:"producer",
+                preferredModels:[String(core.model)],allowedModels:[String(core.model)],
+                initialResponseTimeoutMs:45_000,
+                streamIdleTimeoutMs:45_000,
+                streamTotalTimeoutMs:150_000,
+                onHeartbeat:() => providerHeartbeat(this.env.DB,jobId)
+              });
+              return {model:ai.model,content:ai.content};
+            });
+            if (!teaching || typeof teaching !== "object" || !("content" in teaching)) {
+              throw new Error("tr8_teaching_result_not_serializable");
+            }
+            const teachingObject = parseGeneratedJsonObject(String(teaching.content));
+            return {model:String(core.model),content:JSON.stringify({
+              familyId:coreObject.familyId,
+              instanceId:coreObject.instanceId,
+              diversityPlan,
+              stimulus:coreObject.stimulus,
+              stem:coreObject.stem,
+              options:coreObject.options,
+              correctIndex:coreObject.correctIndex,
+              evidenceUnits:coreObject.evidenceUnits,
+              correctSupportEvidenceIds:coreObject.correctSupportEvidenceIds,
+              styleProfile:coreObject.styleProfile,
+              correctFeedback:teachingObject.correctFeedback,
+              solutionSteps:teachingObject.solutionSteps,
+              hints:teachingObject.hints,
+              distractors:teachingObject.distractors
+            })};
           },
           review: async ({itemIndex,attempt,stage,producerModel,blindReviewerModel,system,prompt}: {itemIndex:number;attempt:number;stage:"blind-resolution"|"quality-audit";producerModel:string;blindReviewerModel?:string;system:string;prompt:string}) => {
             const reviewed = await step.do(`tr8 ${stage} ${itemIndex + 1}.${attempt}`, {retries:{limit:1,delay:"7 seconds",backoff:"exponential"}}, async () => {

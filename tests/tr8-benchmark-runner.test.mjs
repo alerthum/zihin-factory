@@ -168,9 +168,9 @@ test("workflow success follows the complete batch gate, not only individual pass
   assert.doesNotMatch(workflow, /ok:benchmark\.engineeringPassCount===benchmark\.sampleSize/);
   assert.match(workflow, /avoidModels:\[producerModel,\.\.\.\(blindReviewerModel \? \[blindReviewerModel\] : \[\]\)\]/);
   assert.match(workflow, /allowedModels:\[/);
-  assert.match(workflow, /maxTokens:1600/);
+  assert.match(workflow, /tr8 core producer/);
+  assert.match(workflow, /tr8 teaching producer/);
+  assert.match(workflow, /maxTokens:1050/);
   assert.match(workflow, /streamTotalTimeoutMs:150_000/);
-  const producerRoute = workflow.match(/purpose:"producer",[\s\S]*?onHeartbeat:/)?.[0] ?? "";
-  assert.ok(producerRoute.indexOf("nemotron-super-49b") < producerRoute.indexOf("llama-3.1-8b"));
-  assert.doesNotMatch(producerRoute, /nemotron-mini-4b/);
+  assert.ok(workflow.indexOf("nemotron-super-49b") < workflow.indexOf("llama-3.1-8b"));
 });

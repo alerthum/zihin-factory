@@ -50,6 +50,11 @@ export async function runTr8Benchmark({
         const producer = await produce({
           itemIndex,
           attempt,
+          instanceId,
+          diversityPlan,
+          revision,
+          theme: themes[itemIndex % Math.max(1, themes.length)] || undefined,
+          morphologyNotes,
           system: generatorSystemPrompt(),
           prompt: generatorPrompt({
             instanceId,

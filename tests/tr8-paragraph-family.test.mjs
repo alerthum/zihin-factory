@@ -4,8 +4,12 @@ import {
   TR8_MAIN_IDEA_FAMILY_V1,
   blindReviewerPrompt,
   compileCandidate,
+  generatorCorePrompt,
+  generatorCoreSystemPrompt,
   generatorPrompt,
   generatorSystemPrompt,
+  generatorTeachingPrompt,
+  generatorTeachingSystemPrompt,
   parseEngineeringReview,
   parseBlindResolution,
   parseGeneratedCandidate,
@@ -206,4 +210,19 @@ test("generator example satisfies every compiler array cardinality", () => {
   assert.equal(example.distractors.length, 3);
   assert.deepEqual(example.distractors.map((item) => item.optionIndex).sort(), [1, 2, 3]);
   assert.match(generatorSystemPrompt(), /exactly four evidenceUnits, three solutionSteps, three progressive hints, and three distractors/);
+});
+
+test("staged producer separates the real question core from the teaching payload", () => {
+  const plan = tr8DiversityPlan(0);
+  const corePrompt = generatorCorePrompt({ instanceId: "staged-item", diversityPlan: plan, theme: "kent belleği" });
+  assert.match(generatorCoreSystemPrompt(), /110-135 words/i);
+  assert.match(corePrompt, /options.*exactly 4/i);
+  assert.doesNotMatch(corePrompt, /A text|95-155 original Turkish words/);
+  const teachingPrompt = generatorTeachingPrompt({
+    diversityPlan: plan,
+    core: { stimulus: "Gerçek paragraf", options: ["A", "B", "C", "D"], evidenceUnits: [] }
+  });
+  assert.match(generatorTeachingSystemPrompt(), /teaching layer/i);
+  assert.match(teachingPrompt, /exactly 3 objects/i);
+  assert.match(teachingPrompt, /at least 12 Turkish words/i);
 });

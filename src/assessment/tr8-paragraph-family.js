@@ -145,8 +145,7 @@ function list(value, field, minimum) {
 }
 
 export function parseGeneratedCandidate(raw) {
-  const candidateJson = balancedObject(raw) ?? stripFences(raw);
-  const candidate = JSON.parse(candidateJson);
+  const candidate = parseGeneratedJsonObject(raw);
   if (!candidate || typeof candidate !== "object") throw new Error("candidate-json-invalid");
   text(candidate.instanceId, "instanceId");
   text(candidate.familyId, "familyId");
@@ -162,6 +161,13 @@ export function parseGeneratedCandidate(raw) {
   text(candidate.diversityPlan?.reasoningPathId, "diversityPlan.reasoningPathId");
   text(candidate.diversityPlan?.genreId, "diversityPlan.genreId");
   return candidate;
+}
+
+export function parseGeneratedJsonObject(raw) {
+  const objectJson = balancedObject(raw) ?? stripFences(raw);
+  const value = JSON.parse(objectJson);
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("generated-json-object-invalid");
+  return value;
 }
 
 export function compileCandidate(candidate, {
@@ -311,6 +317,68 @@ export function generatorSystemPrompt() {
     "Every descriptive string in the JSON shape is a placeholder, not content: replace every placeholder with original, natural Turkish content.",
     "Before returning, verify that stimulus has 95-155 Turkish words, every option has 7-18 words, and no placeholder phrase remains."
   ].join(" ");
+}
+
+export function generatorCoreSystemPrompt() {
+  return [
+    "Create the core of one difficult grade-8 Turkish main-idea question.",
+    "Return one strict JSON object only; never return a schema, template, placeholder, title-only text or commentary.",
+    "The stimulus must be a complete original Turkish paragraph of 110-135 words and 6-9 natural sentences.",
+    "Write exactly four distinct, plausible Turkish options of 8-16 words; only the assigned index is correct.",
+    "Every option must discuss the same subject, and no option may repeat the stem.",
+    "Provide exactly four concise evidence units grounded in the paragraph."
+  ].join(" ");
+}
+
+export function generatorCorePrompt({
+  family = TR8_MAIN_IDEA_FAMILY_V1,
+  instanceId,
+  theme,
+  morphologyNotes = [],
+  diversityPlan,
+  revision = ""
+} = {}) {
+  const plan = diversityPlan || tr8DiversityPlan(0);
+  return [
+    `familyId (copy exactly): ${family.familyId}`,
+    `instanceId (copy exactly): ${text(instanceId, "instanceId")}`,
+    `theme: ${theme || "timeless science, culture, daily life or environment"}`,
+    `assigned correctIndex: ${plan.correctIndex}`,
+    `genre: ${plan.genreId}`,
+    `discourse structure: ${plan.discourseStructureId}`,
+    `reasoning path: ${plan.reasoningPathId}`,
+    `structure notes: ${morphologyNotes.join("; ") || "multi-evidence synthesis with close distractors"}`,
+    revision ? `revision required after a failed audit: ${revision}` : "",
+    "Return these JSON keys with finished Turkish content: familyId, instanceId, stimulus, stem, options, correctIndex, evidenceUnits, correctSupportEvidenceIds, styleProfile.",
+    "options must contain exactly 4 strings. evidenceUnits must contain exactly 4 objects with ids E1, E2, E3, E4 and a text field.",
+    "correctSupportEvidenceIds must contain at least 3 evidence ids. styleProfile must contain genre and voice.",
+    "Count the stimulus words and option words silently before returning. Do not output the count."
+  ].filter(Boolean).join("\n");
+}
+
+export function generatorTeachingSystemPrompt() {
+  return [
+    "Build only the student-visible teaching layer for the supplied Turkish question core.",
+    "Return one strict JSON object only, with no schema, placeholders or commentary.",
+    "Do not change the paragraph, options, correct answer or evidence units.",
+    "Feedback must explain the specific reasoning error and point to evidence; generic feedback is forbidden.",
+    "Hints must progress from evidence detection to relation building to scope checking without revealing the answer."
+  ].join(" ");
+}
+
+export function generatorTeachingPrompt({ core, diversityPlan } = {}) {
+  const plan = diversityPlan || tr8DiversityPlan(0);
+  const distractorIndices = [0, 1, 2, 3].filter((index) => index !== plan.correctIndex);
+  return [
+    `QUESTION CORE:\n${JSON.stringify(core)}`,
+    `The correct option index is ${plan.correctIndex}. Distractor option indices are ${distractorIndices.join(", ")}.`,
+    "Return exactly these JSON keys: correctFeedback, solutionSteps, hints, distractors.",
+    "correctFeedback must explain why at least three evidence units jointly support the correct option.",
+    "solutionSteps: exactly 3 objects with id s1/s2/s3, action, evidenceIds and a specific explanation.",
+    "hints: exactly 3 objects with a text field, progressively useful and non-revealing.",
+    "distractors: exactly 3 objects, one for each listed distractor index, using misconceptionIds detail-as-main-idea, overgeneralized-main-idea and relation-reversal exactly once.",
+    "Each distractor object must include optionIndex, misconceptionId, supportingEvidenceIds, contradictionEvidenceIds and feedback of at least 12 Turkish words."
+  ].join("\n");
 }
 
 export function generatorPrompt({
