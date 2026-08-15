@@ -294,6 +294,9 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
                   "qwen/qwen2.5-72b-instruct",
                   "mistralai/mistral-small-3.1-24b-instruct-2503"
                 ],
+                initialResponseTimeoutMs:45_000,
+                streamIdleTimeoutMs:45_000,
+                streamTotalTimeoutMs:150_000,
                 onHeartbeat:() => providerHeartbeat(this.env.DB,jobId)
               });
               return {model:ai.model,content:ai.content};
@@ -309,6 +312,9 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
                 system,
                 prompt,maxTokens:900,temperature:0,purpose:"reviewer",
                 avoidModels:[producerModel,...(blindReviewerModel ? [blindReviewerModel] : [])],
+                initialResponseTimeoutMs:45_000,
+                streamIdleTimeoutMs:45_000,
+                streamTotalTimeoutMs:120_000,
                 onHeartbeat:() => providerHeartbeat(this.env.DB,jobId)
               });
               return {model:ai.model,content:ai.content};

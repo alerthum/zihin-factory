@@ -145,7 +145,16 @@ async function streamingCompletion(
   env: NvidiaEnv,
   model: string,
   body: Record<string, unknown>,
-  onHeartbeat?: () => Promise<void> | void
+  onHeartbeat?: () => Promise<void> | void,
+  timeouts: {
+    initialResponseMs: number;
+    streamIdleMs: number;
+    streamTotalMs: number;
+  } = {
+    initialResponseMs: INITIAL_RESPONSE_TIMEOUT_MS,
+    streamIdleMs: STREAM_IDLE_TIMEOUT_MS,
+    streamTotalMs: STREAM_TOTAL_TIMEOUT_MS
+  }
 ): Promise<NvidiaResult> {
   const controller = new AbortController();
   let lastHeartbeatAt = 0;
@@ -157,7 +166,7 @@ async function streamingCompletion(
     try { await onHeartbeat(); } catch { /* heartbeat must not fail provider work */ }
   };
   await heartbeat(true);
-  const initialTimer = setTimeout(() => controller.abort("nvidia_initial_response_timeout"), INITIAL_RESPONSE_TIMEOUT_MS);
+  const initialTimer = setTimeout(() => controller.abort("nvidia_initial_response_timeout"), timeouts.initialResponseMs);
   let response: Response;
   try {
     response = await fetch(`${API_BASE}/chat/completions`, {
@@ -196,12 +205,12 @@ async function streamingCompletion(
   let doneSignal = false;
 
   while (!doneSignal) {
-    if (Date.now() - started > STREAM_TOTAL_TIMEOUT_MS) {
+    if (Date.now() - started > timeouts.streamTotalMs) {
       controller.abort("nvidia_stream_total_timeout");
       throw new Error("nvidia_stream_total_timeout");
     }
 
-    const chunk = await readWithTimeout(reader, controller, STREAM_IDLE_TIMEOUT_MS);
+    const chunk = await readWithTimeout(reader, controller, timeouts.streamIdleMs);
     await heartbeat();
     if (chunk.done) break;
     buffer += decoder.decode(chunk.value, { stream: true });
@@ -249,6 +258,9 @@ export async function runNvidiaText(
     avoidModels?: string[];
     preferredModels?: string[];
     allowedModels?: string[];
+    initialResponseTimeoutMs?: number;
+    streamIdleTimeoutMs?: number;
+    streamTotalTimeoutMs?: number;
     onHeartbeat?: () => Promise<void> | void;
     onAttempt?: (event: ProviderAttemptEvent) => Promise<void> | void;
   }
@@ -285,7 +297,11 @@ export async function runNvidiaText(
         messages,
         max_tokens: Math.max(64, Math.min(1200, input.maxTokens ?? 900)),
         temperature: input.temperature ?? 0.2
-      }, input.onHeartbeat);
+      }, input.onHeartbeat, {
+        initialResponseMs: Math.max(INITIAL_RESPONSE_TIMEOUT_MS, Math.min(60_000, input.initialResponseTimeoutMs ?? INITIAL_RESPONSE_TIMEOUT_MS)),
+        streamIdleMs: Math.max(STREAM_IDLE_TIMEOUT_MS, Math.min(60_000, input.streamIdleTimeoutMs ?? STREAM_IDLE_TIMEOUT_MS)),
+        streamTotalMs: Math.max(STREAM_TOTAL_TIMEOUT_MS, Math.min(180_000, input.streamTotalTimeoutMs ?? STREAM_TOTAL_TIMEOUT_MS))
+      });
       try { await input.onAttempt?.({ purpose:input.purpose ?? "producer",model,outcome:"success",latencyMs:Date.now()-startedAt }); } catch { /* telemetry cannot break provider */ }
       return result;
     } catch (error) {
