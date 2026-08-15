@@ -295,7 +295,7 @@ export async function runNvidiaText(
       try { await input.onAttempt?.({ purpose:input.purpose ?? "producer",model,outcome:"start" }); } catch { /* telemetry cannot break provider */ }
       const result = await streamingCompletion(env, model, {
         messages,
-        max_tokens: Math.max(64, Math.min(1200, input.maxTokens ?? 900)),
+        max_tokens: Math.max(64, Math.min(2400, input.maxTokens ?? 900)),
         temperature: input.temperature ?? 0.2
       }, input.onHeartbeat, {
         initialResponseMs: Math.max(INITIAL_RESPONSE_TIMEOUT_MS, Math.min(60_000, input.initialResponseTimeoutMs ?? INITIAL_RESPONSE_TIMEOUT_MS)),

@@ -279,7 +279,7 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
           produce: async ({itemIndex,attempt,system,prompt}: {itemIndex:number;attempt:number;system:string;prompt:string}) => {
             const produced = await step.do(`tr8 producer ${itemIndex + 1}.${attempt}`, {retries:{limit:1,delay:"7 seconds",backoff:"exponential"}}, async () => {
               const ai = await runFactoryAI(this.env,{
-                system,prompt,maxTokens:1200,temperature:0.18,purpose:"producer",
+                system,prompt,maxTokens:1600,temperature:0.18,purpose:"producer",
                 preferredModels:[
                   "nvidia/llama-3.3-nemotron-super-49b-v1.5",
                   "meta/llama-3.3-70b-instruct",
