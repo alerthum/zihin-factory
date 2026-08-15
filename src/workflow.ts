@@ -10,7 +10,10 @@ import { guidanceForError, guidanceTelegramText } from "./operations/guidance";
 import { applyProductDeterministicIssues, deterministicProductReview, productPatchDeterministicIssues, verificationManifestIssues } from "./quality/product-gates";
 import { runTr8Benchmark } from "./assessment/tr8-benchmark-runner.js";
 import {
+  assembleTr8MicroAuthorCore,
   generatorCorePrompt,
+  generatorCoreRepairPrompt,
+  generatorCoreRepairSystemPrompt,
   generatorCoreSystemPrompt,
   generatorTeachingPrompt,
   generatorTeachingSystemPrompt,
@@ -297,7 +300,7 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
               const ai = await runFactoryAI(this.env,{
                 system:generatorCoreSystemPrompt(),
                 prompt:generatorCorePrompt({instanceId,diversityPlan,revision,theme,morphologyNotes}),
-                maxTokens:1050,temperature:0.2,purpose:"producer",
+                maxTokens:2000,temperature:0.2,purpose:"producer",
                 preferredModels,allowedModels:preferredModels,
                 initialResponseTimeoutMs:45_000,
                 streamIdleTimeoutMs:45_000,
@@ -309,7 +312,33 @@ export class FactoryWorkflow extends WorkflowEntrypoint<Env, FactoryJobParams> {
             if (!core || typeof core !== "object" || !("model" in core) || !("content" in core)) {
               throw new Error("tr8_core_result_not_serializable");
             }
-            const coreObject = validateGeneratedCore(parseGeneratedJsonObject(String(core.content)), {diversityPlan});
+            const parsedCore = parseGeneratedJsonObject(String(core.content));
+            let coreObject;
+            try {
+              coreObject = validateGeneratedCore(assembleTr8MicroAuthorCore(parsedCore), {diversityPlan});
+            } catch (error) {
+              const repairReason = error instanceof Error ? error.message : String(error);
+              if (!repairReason.startsWith("core-sentence-")) throw error;
+              const repaired = await step.do(`tr8 core repair ${itemIndex + 1}.${attempt}`, {retries:{limit:1,delay:"7 seconds",backoff:"exponential"}}, async () => {
+                const ai = await runFactoryAI(this.env,{
+                  system:generatorCoreRepairSystemPrompt(),
+                  prompt:generatorCoreRepairPrompt({core:parsedCore,error:repairReason}),
+                  maxTokens:2000,temperature:0.05,purpose:"producer",
+                  preferredModels:[String(core.model)],allowedModels:[String(core.model)],
+                  initialResponseTimeoutMs:45_000,
+                  streamIdleTimeoutMs:45_000,
+                  streamTotalTimeoutMs:150_000,
+                  onHeartbeat:() => providerHeartbeat(this.env.DB,jobId)
+                });
+                return {content:ai.content};
+              });
+              if (!repaired || typeof repaired !== "object" || !("content" in repaired)) {
+                throw new Error("tr8_core_repair_result_not_serializable");
+              }
+              coreObject = validateGeneratedCore(
+                assembleTr8MicroAuthorCore(parseGeneratedJsonObject(String(repaired.content))), {diversityPlan}
+              );
+            }
             const teaching = await step.do(`tr8 teaching producer ${itemIndex + 1}.${attempt}`, {retries:{limit:1,delay:"7 seconds",backoff:"exponential"}}, async () => {
               const ai = await runFactoryAI(this.env,{
                 system:generatorTeachingSystemPrompt(),

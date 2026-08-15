@@ -88,6 +88,17 @@ const GENRES = Object.freeze([
   "daily-life-analysis"
 ]);
 
+export const TR8_MICRO_AUTHOR_TASKS_V1 = Object.freeze([
+  "Establish the topic and a concrete situation without stating the final main idea.",
+  "Introduce the first observable evidence unit that matters to the assigned reasoning path.",
+  "Add a contrast, limitation or complication required by the assigned discourse structure.",
+  "Supply a second concrete evidence unit that cannot be reduced to the previous sentence.",
+  "Show a change, counterexample or consequence that deepens the relationship between the evidence units.",
+  "Connect at least two earlier observations while preserving their scope and uncertainty.",
+  "Qualify the emerging inference so that it does not become an unsupported generalization.",
+  "Close by synthesizing the paragraph without copying any answer option or announcing the answer."
+]);
+
 export const TR8_DIVERSITY_PLANS_V1 = Object.freeze(Array.from({ length: 20 }, (_, itemIndex) => Object.freeze({
   planId: `tr8-main-idea-diversity-${String(itemIndex + 1).padStart(2, "0")}`,
   discourseStructureId: DISCOURSE_STRUCTURES[itemIndex % DISCOURSE_STRUCTURES.length],
@@ -165,9 +176,56 @@ export function parseGeneratedCandidate(raw) {
 
 export function parseGeneratedJsonObject(raw) {
   const objectJson = balancedObject(raw) ?? stripFences(raw);
-  const value = JSON.parse(objectJson);
+  let value;
+  try {
+    value = JSON.parse(objectJson);
+  } catch (initialError) {
+    let quoted = false;
+    let escaped = false;
+    let repaired = "";
+    for (const character of objectJson) {
+      if (quoted && !escaped) {
+        if (character === "\n") { repaired += "\\n"; continue; }
+        if (character === "\r") { repaired += "\\r"; continue; }
+        if (character === "\t") { repaired += "\\t"; continue; }
+        if (character === "\b") { repaired += "\\b"; continue; }
+        if (character === "\f") { repaired += "\\f"; continue; }
+      }
+      repaired += character;
+      if (quoted) {
+        if (escaped) escaped = false;
+        else if (character === "\\") escaped = true;
+        else if (character === '"') quoted = false;
+      } else if (character === '"') {
+        quoted = true;
+      }
+    }
+    if (repaired === objectJson) throw initialError;
+    value = JSON.parse(repaired);
+  }
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("generated-json-object-invalid");
   return value;
+}
+
+export function assembleTr8MicroAuthorCore(core) {
+  const sentences = Array.isArray(core?.sentences) ? core.sentences : [];
+  if (sentences.length !== TR8_MICRO_AUTHOR_TASKS_V1.length) {
+    throw new Error(`core-sentence-count:${sentences.length}; exactly 8 micro-author sentences are required`);
+  }
+  const checkedSentences = sentences.map((value, index) => {
+    const sentence = text(value, `core.sentences.${index}`);
+    const wordCount = sentence.split(/\s+/u).filter(Boolean).length;
+    if (wordCount < 14 || wordCount > 18) {
+      throw new Error(`core-sentence-${index + 1}-word-count:${wordCount}; every micro-author sentence must contain 14-18 words`);
+    }
+    const boundaries = sentence.match(/[.!?…](?=\s|$)/gu) || [];
+    if (boundaries.length !== 1 || !/[.!?…]$/u.test(sentence)) {
+      throw new Error(`core-sentence-${index + 1}-boundary; every micro-author entry must contain exactly one complete sentence`);
+    }
+    return sentence;
+  });
+  const { sentences: _sentences, stimulus: _modelStimulus, ...rest } = core;
+  return { ...rest, stimulus: checkedSentences.join(" ") };
 }
 
 export function validateGeneratedCore(core, { diversityPlan } = {}) {
@@ -298,6 +356,21 @@ export function compileCandidate(candidate, {
     })),
     optionFeedback,
     misconceptionIds,
+    instructionalMetadata: {
+      outcomeIds: [...family.curriculum.outcomeIds],
+      learningObjective: family.cognitiveModel.target,
+      thinkingSkill: family.construct.primarySkill,
+      cognitiveProcess: family.construct.cognitiveProcess,
+      targetDifficulty: family.construct.intendedDifficultyBand,
+      correctAnswerRationale: optionFeedback[candidate.correctIndex].text,
+      distractorStudentMisconceptions: optionFeedback.filter((entry) => !entry.correct).map((entry) => ({
+        optionId: entry.optionId,
+        misconceptionId: entry.misconceptionId,
+        description: family.misconceptions.find((item) => item.id === entry.misconceptionId)?.description || entry.misconceptionId
+      })),
+      teachingExplanation: solutionGraph.map((step) => step.evidence).join(" "),
+      deterministicReplayFingerprint: `${family.familyId}@${family.version}:${expectedPlan.planId}:${text(candidate.instanceId, "instanceId")}`
+    },
     verifier: {
       solverId: text(proof.solverId || "tr8-main-idea-solver-v1", "proof.solverId"),
       independentVerifierId: text(proof.independentVerifierId || "tr8-main-idea-independent-verifier-v1", "proof.independentVerifierId"),
@@ -344,7 +417,11 @@ export function generatorCoreSystemPrompt() {
   return [
     "Create the core of one difficult grade-8 Turkish main-idea question.",
     "Return one strict JSON object only; never return a schema, template, placeholder, title-only text or commentary.",
-    "The stimulus must be one complete original Turkish paragraph of exactly 8 natural sentences; each sentence must contain 14-18 words, yielding 112-144 words total.",
+    "Keep JSON string values on one physical line; escape any required line break instead of emitting a raw control character.",
+    "Return the stimulus as exactly eight independent sentence strings in a sentences array; never assemble or return a stimulus paragraph.",
+    "Write every sentence as exactly 16 whitespace-separated words of natural Turkish; this safe target sits inside the factory's 14-18 words validation range.",
+    "Inside a sentence use no period, question mark, exclamation mark, ellipsis, abbreviation, initial, decimal or quoted question; use exactly one final period as its last character.",
+    "Silently split every sentence on whitespace and recount it; rewrite any sentence that is not exactly 16 words before returning JSON.",
     "Write exactly four distinct, plausible Turkish options of 8-16 words; only the assigned index is correct.",
     "Every option must discuss the same subject, and no option may repeat the stem.",
     "Provide exactly four concise evidence units grounded in the paragraph."
@@ -370,11 +447,32 @@ export function generatorCorePrompt({
     `reasoning path: ${plan.reasoningPathId}`,
     `structure notes: ${morphologyNotes.join("; ") || "multi-evidence synthesis with close distractors"}`,
     revision ? `revision required after a failed audit: ${revision}` : "",
-    "Return these JSON keys with finished Turkish content: familyId, instanceId, stimulus, stem, options, correctIndex, evidenceUnits, correctSupportEvidenceIds, styleProfile.",
+    `Eight sentence assignments, in fixed order:\n${TR8_MICRO_AUTHOR_TASKS_V1.map((task, index) => `${index + 1}. ${task}`).join("\n")}`,
+    "Return these JSON keys with finished Turkish content: familyId, instanceId, sentences, stem, options, correctIndex, evidenceUnits, correctSupportEvidenceIds, styleProfile.",
+    "sentences must contain exactly 8 complete Turkish sentence strings, in assignment order, with exactly 16 whitespace-separated words per string.",
+    "Every sentence string must contain exactly one period, as its final character, and no other sentence-ending punctuation.",
     "options must contain exactly 4 strings. evidenceUnits must contain exactly 4 objects with ids E1, E2, E3, E4 and a text field.",
     "correctSupportEvidenceIds must contain at least 3 evidence ids. styleProfile must contain genre and voice.",
-    "Write exactly 8 stimulus sentences and check that every sentence has 14-18 words. Count the option words silently. Do not output any counts."
+    "Count every sentence and option silently. Do not output counts, a combined paragraph or extra keys."
   ].filter(Boolean).join("\n");
+}
+
+export function generatorCoreRepairSystemPrompt() {
+  return [
+    "Repair the supplied grade-8 Turkish question core and return one strict JSON object only.",
+    "Preserve every valid field and idea; change only sentence strings that violate the reported deterministic sentence error.",
+    "Every sentence must have exactly 16 whitespace-separated words and exactly one period as its final character.",
+    "Use no other period, question mark, exclamation mark, ellipsis, abbreviation, initial, decimal or quoted question inside a sentence.",
+    "Silently split and recount all eight sentences before returning the complete repaired object."
+  ].join(" ");
+}
+
+export function generatorCoreRepairPrompt({ core, error } = {}) {
+  return [
+    `DETERMINISTIC ERROR: ${String(error || "sentence validation failed")}`,
+    `CORE TO REPAIR:\n${JSON.stringify(core)}`,
+    "Return the complete repaired core JSON with the same keys and exactly eight sentence strings."
+  ].join("\n\n");
 }
 
 export function generatorTeachingSystemPrompt() {
