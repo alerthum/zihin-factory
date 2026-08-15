@@ -6,6 +6,8 @@ import {
   blindReviewerPrompt,
   compileCandidate,
   generatorCorePrompt,
+  generatorCoreRepairPrompt,
+  generatorCoreRepairSystemPrompt,
   generatorCoreSystemPrompt,
   generatorPrompt,
   generatorSystemPrompt,
@@ -34,6 +36,16 @@ test("micro-author prompt gives the model a safe exact target inside determinist
   assert.match(system, /exactly one final period/);
   assert.match(prompt, /exactly 16 whitespace-separated words/);
   assert.match(prompt, /exactly one period/);
+});
+
+test("micro-author repair prompt preserves the core while targeting only deterministic sentence failures", () => {
+  const core = { instanceId: "repair-check", sentences: ["Kısa cümle."] };
+  const system = generatorCoreRepairSystemPrompt();
+  const prompt = generatorCoreRepairPrompt({ core, error: "core-sentence-1-word-count:2" });
+  assert.match(system, /change only sentence strings/);
+  assert.match(system, /exactly 16 whitespace-separated words/);
+  assert.match(prompt, /core-sentence-1-word-count:2/);
+  assert.match(prompt, /repair-check/);
 });
 
 const stimulus = [

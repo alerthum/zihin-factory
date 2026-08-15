@@ -457,6 +457,24 @@ export function generatorCorePrompt({
   ].filter(Boolean).join("\n");
 }
 
+export function generatorCoreRepairSystemPrompt() {
+  return [
+    "Repair the supplied grade-8 Turkish question core and return one strict JSON object only.",
+    "Preserve every valid field and idea; change only sentence strings that violate the reported deterministic sentence error.",
+    "Every sentence must have exactly 16 whitespace-separated words and exactly one period as its final character.",
+    "Use no other period, question mark, exclamation mark, ellipsis, abbreviation, initial, decimal or quoted question inside a sentence.",
+    "Silently split and recount all eight sentences before returning the complete repaired object."
+  ].join(" ");
+}
+
+export function generatorCoreRepairPrompt({ core, error } = {}) {
+  return [
+    `DETERMINISTIC ERROR: ${String(error || "sentence validation failed")}`,
+    `CORE TO REPAIR:\n${JSON.stringify(core)}`,
+    "Return the complete repaired core JSON with the same keys and exactly eight sentence strings."
+  ].join("\n\n");
+}
+
 export function generatorTeachingSystemPrompt() {
   return [
     "Build only the student-visible teaching layer for the supplied Turkish question core.",
